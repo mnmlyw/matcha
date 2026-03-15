@@ -1,0 +1,9 @@
+This is a plain text file.
+No syntax highlighting should be applied here.
+
+Everything should render in the default foreground color.
+
+const fn struct — these are just words, not keywords.
+"strings" and // comments should not be colored either.
+
+Numbers like 42 and 0xFF stay the same color too.

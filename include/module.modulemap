@@ -1,0 +1,4 @@
+module MatchaKit [system] {
+    header "matcha.h"
+    export *
+}

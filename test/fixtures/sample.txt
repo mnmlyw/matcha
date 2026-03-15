@@ -1,0 +1,19 @@
+Hello, world!
+This is a sample text file for testing Matcha.
+
+fn main() void {
+    const std = @import("std");
+    std.debug.print("Hello from Zig!\n", .{});
+}
+
+Line 10: The quick brown fox jumps over the lazy dog.
+Line 11: Pack my box with five dozen liquor jugs.
+Line 12: How vexingly quick daft zebras jump.
+Line 13: The five boxing wizards jump quickly.
+
+// Testing various characters:
+// Brackets: () [] {} <>
+// Symbols: @#$%^&*+-=~`
+// Quotes: "double" 'single' `backtick`
+
+End of test file.
