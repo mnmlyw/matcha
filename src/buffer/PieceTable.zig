@@ -21,6 +21,8 @@ pub const PieceTable = struct {
     original_owned: bool,
     add_buffer: ByteBuffer,
     pieces: PieceList,
+    cached_line_count: ?u32 = null,
+    cached_total_length: ?u32 = null,
 
     pub fn init(allocator: Allocator) PieceTable {
         return .{
@@ -44,6 +46,7 @@ pub const PieceTable = struct {
                 .length = @intCast(content.len),
             });
         }
+        pt.refreshCaches();
         return pt;
     }
 
@@ -55,8 +58,9 @@ pub const PieceTable = struct {
         self.pieces.deinit(self.allocator);
     }
 
-    /// Total length of the document in bytes.
+    /// Total length of the document in bytes (cached).
     pub fn totalLength(self: *const PieceTable) u32 {
+        if (self.cached_total_length) |c| return c;
         var len: u32 = 0;
         for (self.pieces.items) |p| {
             len += p.length;
@@ -79,6 +83,7 @@ pub const PieceTable = struct {
 
         if (self.pieces.items.len == 0) {
             try self.pieces.append(self.allocator, new_piece);
+            self.refreshCaches();
             return;
         }
 
@@ -94,6 +99,7 @@ pub const PieceTable = struct {
         if (idx >= self.pieces.items.len) {
             // Append at end
             try self.pieces.append(self.allocator, new_piece);
+            self.refreshCaches();
             return;
         }
 
@@ -123,6 +129,7 @@ pub const PieceTable = struct {
             try self.pieces.insert(self.allocator, idx + 1, new_piece);
             try self.pieces.insert(self.allocator, idx + 2, right);
         }
+        self.refreshCaches();
     }
 
     /// Delete `len` bytes starting at byte offset `pos`.
@@ -185,6 +192,7 @@ pub const PieceTable = struct {
 
             remaining -= to_delete;
         }
+        self.refreshCaches();
     }
 
     /// Get the byte at a given position from the appropriate source buffer.
@@ -228,8 +236,9 @@ pub const PieceTable = struct {
         return null;
     }
 
-    /// Count newlines in the document.
+    /// Count newlines in the document (cached).
     pub fn lineCount(self: *const PieceTable) u32 {
+        if (self.cached_line_count) |c| return c;
         var count: u32 = 1;
         for (self.pieces.items) |p| {
             const slice = self.sourceSlice(p);
@@ -238,6 +247,25 @@ pub const PieceTable = struct {
             }
         }
         return count;
+    }
+
+    fn refreshCaches(self: *PieceTable) void {
+        // Recompute total length
+        var len: u32 = 0;
+        for (self.pieces.items) |p| {
+            len += p.length;
+        }
+        self.cached_total_length = len;
+
+        // Recompute line count
+        var count: u32 = 1;
+        for (self.pieces.items) |p| {
+            const slice = self.sourceSlice(p);
+            for (slice) |b| {
+                if (b == '\n') count += 1;
+            }
+        }
+        self.cached_line_count = count;
     }
 
     /// Get the byte offset of the start of line `line` (0-based line number).
@@ -306,24 +334,82 @@ pub const PieceTable = struct {
     pub fn lineContent(self: *const PieceTable, allocator: Allocator, line: u32) ![]u8 {
         const start = self.lineStart(line);
         const end = self.lineEnd(line);
+        if (end <= start) return try allocator.alloc(u8, 0);
+        return self.getRange(allocator, start, end);
+    }
+
+    /// Get content in a byte range. Walks pieces directly (O(pieces + range)).
+    pub fn getRange(self: *const PieceTable, allocator: Allocator, start: u32, end: u32) ![]u8 {
         const len = end - start;
         const buf = try allocator.alloc(u8, len);
-        var i: u32 = 0;
-        while (i < len) : (i += 1) {
-            buf[i] = self.byteAt(start + i) orelse 0;
+        var written: u32 = 0;
+        var offset: u32 = 0;
+        for (self.pieces.items) |p| {
+            const piece_end = offset + p.length;
+            if (piece_end <= start) {
+                offset = piece_end;
+                continue;
+            }
+            if (offset >= end) break;
+            const slice = self.sourceSlice(p);
+            const copy_start = if (start > offset) start - offset else 0;
+            const copy_end = if (end < piece_end) end - offset else p.length;
+            const segment = slice[copy_start..copy_end];
+            @memcpy(buf[written..][0..segment.len], segment);
+            written += @intCast(segment.len);
+            offset = piece_end;
         }
         return buf;
     }
 
-    /// Get content in a byte range.
-    pub fn getRange(self: *const PieceTable, allocator: Allocator, start: u32, end: u32) ![]u8 {
-        const len = end - start;
-        const buf = try allocator.alloc(u8, len);
-        var i: u32 = 0;
-        while (i < len) : (i += 1) {
-            buf[i] = self.byteAt(start + i) orelse 0;
+    /// Get line start/end offsets for lines [first_line, last_line) in a single pass.
+    pub fn getLineOffsets(self: *const PieceTable, first_line: u32, last_line: u32, starts: []u32, ends: []u32) void {
+        const count = last_line - first_line;
+        if (count == 0) return;
+        var current_line: u32 = 0;
+        var offset: u32 = 0;
+        var filled: u32 = 0;
+        // Fill starts for lines in range
+        if (first_line == 0) {
+            starts[0] = 0;
+            filled = 1;
         }
-        return buf;
+        for (self.pieces.items) |p| {
+            if (filled >= count and current_line >= last_line) break;
+            const slice = self.sourceSlice(p);
+            for (slice) |b| {
+                if (b == '\n') {
+                    // This newline ends current_line
+                    if (current_line >= first_line and current_line < last_line) {
+                        ends[current_line - first_line] = offset;
+                    }
+                    current_line += 1;
+                    // Next char starts new line
+                    if (current_line >= first_line and current_line < last_line) {
+                        starts[current_line - first_line] = offset + 1;
+                        filled += 1;
+                    }
+                }
+                offset += 1;
+            }
+        }
+        // Handle last line (no trailing newline)
+        while (filled < count) : (filled += 1) {
+            const idx = first_line + filled;
+            if (idx >= first_line and idx < last_line) {
+                if (starts[idx - first_line] == 0 and idx > 0) {
+                    starts[idx - first_line] = offset;
+                }
+                ends[idx - first_line] = offset;
+            }
+        }
+        // Fill any remaining ends for lines that extend to EOF
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            if (ends[i] == 0 and i + first_line >= current_line) {
+                ends[i] = offset;
+            }
+        }
     }
 };
 

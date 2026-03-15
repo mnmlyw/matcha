@@ -31,6 +31,10 @@ pub const Editor = struct {
     filename: ?[]const u8 = null,
     filename_owned: bool = false,
     modified: bool = false,
+    edit_counter: u32 = 0,
+
+    // Render-computed max visible line length (set by RenderState.compute)
+    max_visible_line_len: u32 = 0,
 
     // Syntax highlighting
     language: Language = .none,
@@ -116,6 +120,7 @@ pub const Editor = struct {
 
         try self.buffer.insert(pos, text);
         self.modified = true;
+        self.edit_counter +%= 1;
 
         // Advance cursor
         for (text) |ch| {
@@ -151,6 +156,7 @@ pub const Editor = struct {
 
         try self.buffer.delete(pos - 1, 1);
         self.modified = true;
+        self.edit_counter +%= 1;
 
         // Move cursor back
         if (del_byte == '\n') {
@@ -181,6 +187,7 @@ pub const Editor = struct {
 
         try self.buffer.delete(pos, 1);
         self.modified = true;
+        self.edit_counter +%= 1;
 
         try self.undo_stack.commit();
     }
@@ -232,6 +239,7 @@ pub const Editor = struct {
 
         try self.buffer.delete(start_pos, end_pos - start_pos);
         self.modified = true;
+        self.edit_counter +%= 1;
 
         self.cursor.moveTo(range.start_line, range.start_col);
         self.selection.clear();
@@ -416,6 +424,7 @@ pub const Editor = struct {
         self.cursor.moveTo(group.cursor_line, group.cursor_col);
         self.selection.clear();
         self.modified = true;
+        self.edit_counter +%= 1;
 
         try self.undo_stack.pushRedo(group);
         self.ensureCursorVisible();
@@ -445,6 +454,7 @@ pub const Editor = struct {
 
         self.selection.clear();
         self.modified = true;
+        self.edit_counter +%= 1;
 
         try self.undo_stack.pushUndo(group);
         self.ensureCursorVisible();
@@ -475,17 +485,8 @@ pub const Editor = struct {
         const max_scroll_y = @max(0, total_h - view_h);
         self.scroll_y = @min(self.scroll_y, max_scroll_y);
 
-        // Horizontal: find longest visible line length
-        const first_line: u32 = @intFromFloat(@max(0, self.scroll_y / self.cell_height));
-        const visible: u32 = @intFromFloat(view_h / self.cell_height);
-        const last_line = @min(first_line + visible + 2, self.buffer.lineCount());
-        var max_len: u32 = 0;
-        var line = first_line;
-        while (line < last_line) : (line += 1) {
-            const ll = self.buffer.lineEnd(line) - self.buffer.lineStart(line);
-            if (ll > max_len) max_len = ll;
-        }
-        const content_w = @as(f32, @floatFromInt(max_len)) * self.cell_width;
+        // Horizontal: use max visible line length from last render
+        const content_w = @as(f32, @floatFromInt(self.max_visible_line_len)) * self.cell_width;
         const max_scroll_x = @max(0, content_w - view_w);
         self.scroll_x = @min(self.scroll_x, max_scroll_x);
     }
@@ -526,20 +527,34 @@ pub const Editor = struct {
         const clamped_line = @min(line, self.buffer.lineCount() -| 1);
         const line_start = self.buffer.lineStart(clamped_line);
         const line_end = self.buffer.lineEnd(clamped_line);
-        const line_len = line_end - line_start;
+        var line_len = line_end - line_start;
+        // Exclude trailing newline from line length
+        if (line_len > 0) {
+            if (self.buffer.byteAt(line_start + line_len - 1)) |b| {
+                if (b == '\n') line_len -= 1;
+            }
+        }
+
+        // Empty line — just place cursor, no selection
+        if (line_len == 0) {
+            self.selection.clear();
+            self.cursor.moveTo(clamped_line, 0);
+            return;
+        }
+
         const clamped_col = @min(col, line_len);
 
         var start = clamped_col;
         while (start > 0) {
             const b = self.buffer.byteAt(line_start + start - 1) orelse break;
-            if (isWordSeparator(b) or b == '\n') break;
+            if (isWordSeparator(b)) break;
             start -= 1;
         }
 
         var end = clamped_col;
         while (end < line_len) {
             const b = self.buffer.byteAt(line_start + end) orelse break;
-            if (isWordSeparator(b) or b == '\n') break;
+            if (isWordSeparator(b)) break;
             end += 1;
         }
 
@@ -549,12 +564,12 @@ pub const Editor = struct {
             end = clamped_col;
             while (start > 0) {
                 const b = self.buffer.byteAt(line_start + start - 1) orelse break;
-                if (!isWordSeparator(b) or b == '\n') break;
+                if (!isWordSeparator(b)) break;
                 start -= 1;
             }
             while (end < line_len) {
                 const b = self.buffer.byteAt(line_start + end) orelse break;
-                if (!isWordSeparator(b) or b == '\n') break;
+                if (!isWordSeparator(b)) break;
                 end += 1;
             }
         }
@@ -665,9 +680,9 @@ pub const Editor = struct {
         const total = self.buffer.totalLength();
         if (total == 0) return false;
 
-        // Start searching from position after cursor
-        const start_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
-        var search_pos = if (self.selection.active) start_pos else start_pos;
+        // Start searching from after current selection/cursor
+        const cursor_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        var search_pos = cursor_pos;
 
         // Search forward from cursor, wrapping around
         var checked: u32 = 0;

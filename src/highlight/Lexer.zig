@@ -8,6 +8,8 @@ pub const LineState = struct {
     in_block_comment: bool = false,
     in_multiline_string: bool = false,
     block_comment_depth: u8 = 0,
+    /// Quote character that opened the multi-line string ('"', '\'', or '`')
+    multiline_quote: u8 = '"',
 };
 
 pub const Token = struct {
@@ -74,10 +76,11 @@ pub fn tokenizeLine(
     // ── Continue multi-line string ─────────────────────────────
     if (state.in_multiline_string) {
         const start = i;
+        const mq = state.multiline_quote;
         while (i < len) {
             if (lang == .python) {
-                // Look for """
-                if (i + 2 < len and line_bytes[i] == '"' and line_bytes[i + 1] == '"' and line_bytes[i + 2] == '"') {
+                // Look for matching triple-quote (""" or ''')
+                if (i + 2 < len and line_bytes[i] == mq and line_bytes[i + 1] == mq and line_bytes[i + 2] == mq) {
                     i += 3;
                     state.in_multiline_string = false;
                     break;
@@ -155,13 +158,14 @@ pub fn tokenizeLine(
             continue;
         }
 
-        // Python triple-quote string
-        if (lang == .python and ch == '"' and i + 2 < len and line_bytes[i + 1] == '"' and line_bytes[i + 2] == '"') {
+        // Python triple-quote string (""" or ''')
+        if (lang == .python and (ch == '"' or ch == '\'') and i + 2 < len and line_bytes[i + 1] == ch and line_bytes[i + 2] == ch) {
             const start = i;
+            const q = ch;
             i += 3;
             var found_close = false;
             while (i + 2 < len) {
-                if (line_bytes[i] == '"' and line_bytes[i + 1] == '"' and line_bytes[i + 2] == '"') {
+                if (line_bytes[i] == q and line_bytes[i + 1] == q and line_bytes[i + 2] == q) {
                     i += 3;
                     found_close = true;
                     break;
@@ -171,6 +175,7 @@ pub fn tokenizeLine(
             if (!found_close) {
                 i = len;
                 state.in_multiline_string = true;
+                state.multiline_quote = q;
             }
             try tokens.append(allocator, .{ .start = start, .len = i - start, .type = .string });
             continue;
@@ -193,8 +198,14 @@ pub fn tokenizeLine(
                 i += 1;
             }
             // If backtick string didn't close, it's a template literal
-            if (quote == '`' and i >= len and (i == len) and (i == start + 1 or line_bytes[i - 1] != '`')) {
-                state.in_multiline_string = true;
+            if (quote == '`' and i == len) {
+                // Check if the loop found a closing backtick (it would have done i+=1 past it)
+                // If i==len and the char before i is a backtick AND it's not the opening one, it closed
+                const closed = (i > start + 1 and line_bytes[i - 1] == '`');
+                if (!closed) {
+                    state.in_multiline_string = true;
+                    state.multiline_quote = '`';
+                }
             }
             try tokens.append(allocator, .{ .start = start, .len = i - start, .type = .string });
             continue;
@@ -326,9 +337,10 @@ fn scanLineState(line_bytes: []const u8, state_in: LineState, lang: Language) Li
     }
 
     if (state.in_multiline_string) {
+        const mq = state.multiline_quote;
         while (i < len) {
             if (lang == .python) {
-                if (i + 2 < len and line_bytes[i] == '"' and line_bytes[i + 1] == '"' and line_bytes[i + 2] == '"') {
+                if (i + 2 < len and line_bytes[i] == mq and line_bytes[i + 1] == mq and line_bytes[i + 2] == mq) {
                     state.in_multiline_string = false;
                     i += 3;
                     break;
@@ -386,17 +398,23 @@ fn scanLineState(line_bytes: []const u8, state_in: LineState, lang: Language) Li
             continue;
         }
 
-        // Python triple-quote
-        if (lang == .python and ch == '"' and i + 2 < len and line_bytes[i + 1] == '"' and line_bytes[i + 2] == '"') {
+        // Python triple-quote (""" or ''')
+        if (lang == .python and (ch == '"' or ch == '\'') and i + 2 < len and line_bytes[i + 1] == ch and line_bytes[i + 2] == ch) {
+            const q = ch;
             i += 3;
+            var found_close = false;
             while (i + 2 < len) {
-                if (line_bytes[i] == '"' and line_bytes[i + 1] == '"' and line_bytes[i + 2] == '"') {
+                if (line_bytes[i] == q and line_bytes[i + 1] == q and line_bytes[i + 2] == q) {
                     i += 3;
+                    found_close = true;
                     break;
                 }
                 i += 1;
-            } else {
+            }
+            if (!found_close) {
                 state.in_multiline_string = true;
+                state.multiline_quote = q;
+                i = len; // consume remaining chars to avoid misparse
             }
             continue;
         }
@@ -405,6 +423,7 @@ fn scanLineState(line_bytes: []const u8, state_in: LineState, lang: Language) Li
         if (ch == '"' or ch == '\'' or (ch == '`' and lang == .javascript)) {
             const quote = ch;
             i += 1;
+            var found_close = false;
             while (i < len) {
                 if (line_bytes[i] == '\\' and i + 1 < len) {
                     i += 2;
@@ -412,15 +431,14 @@ fn scanLineState(line_bytes: []const u8, state_in: LineState, lang: Language) Li
                 }
                 if (line_bytes[i] == quote) {
                     i += 1;
+                    found_close = true;
                     break;
                 }
                 i += 1;
             }
-            if (quote == '`' and i >= len) {
-                // Check if we actually found a closing backtick
-                if (i == len and (line_bytes[len - 1] != '`')) {
-                    state.in_multiline_string = true;
-                }
+            if (quote == '`' and !found_close) {
+                state.in_multiline_string = true;
+                state.multiline_quote = '`';
             }
             continue;
         }

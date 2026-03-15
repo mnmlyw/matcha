@@ -49,6 +49,10 @@ class MetalEditorView: MTKView, MTKViewDelegate {
                                      scaleFactor: Float(scale))
         }
 
+        // Prevent stretching/blurring during live resize
+        self.layerContentsPlacement = .topLeft
+        self.layer?.isOpaque = true
+
         self.becomeFirstResponder()
         startCursorBlink()
     }
@@ -68,6 +72,22 @@ class MetalEditorView: MTKView, MTKViewDelegate {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         updateViewport()
+        // Force immediate redraw during resize to avoid stale frame stretching
+        if inLiveResize {
+            self.draw()
+        }
+    }
+
+    override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        self.isPaused = false
+        self.enableSetNeedsDisplay = false
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        self.isPaused = false
+        self.enableSetNeedsDisplay = false
     }
 
     private func calculateCellDimensions() {
