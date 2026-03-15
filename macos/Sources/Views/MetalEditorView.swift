@@ -133,6 +133,16 @@ class MetalEditorView: MTKView, MTKViewDelegate {
             case "c": copySelection(); return
             case "x": cutSelection(); return
             case "v": pasteFromClipboard(); return
+            case "f":
+                NotificationCenter.default.post(name: .matchaToggleFind, object: nil)
+                return
+            case "g":
+                if hasShift {
+                    NotificationCenter.default.post(name: .matchaFindPrev, object: nil)
+                } else {
+                    NotificationCenter.default.post(name: .matchaFindNext, object: nil)
+                }
+                return
             default: break
             }
         }
@@ -179,8 +189,18 @@ class MetalEditorView: MTKView, MTKViewDelegate {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let loc = convert(event.locationInWindow, from: nil)
-        let extend = event.modifierFlags.contains(.shift)
-        editor.click(x: Float(loc.x), y: Float(bounds.height - loc.y), extend: extend)
+        let x = Float(loc.x)
+        let y = Float(bounds.height - loc.y)
+
+        switch event.clickCount {
+        case 2:
+            editor.doubleClick(x: x, y: y)
+        case 3:
+            editor.tripleClick(x: x, y: y)
+        default:
+            let extend = event.modifierFlags.contains(.shift)
+            editor.click(x: x, y: y, extend: extend)
+        }
         resetCursorBlink()
     }
 

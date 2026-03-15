@@ -1,0 +1,25 @@
+#!/bin/bash
+# Matcha CLI launcher
+# Usage: matcha [file]
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/zig-out/Matcha.app"
+BINARY="$APP_DIR/Contents/MacOS/Matcha"
+
+if [ ! -f "$BINARY" ]; then
+    echo "Matcha not built. Run: zig build app" >&2
+    exit 1
+fi
+
+# Resolve relative paths to absolute
+args=()
+for arg in "$@"; do
+    if [ -e "$arg" ]; then
+        args+=("$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")")
+    else
+        args+=("$arg")
+    fi
+done
+
+# Launch the app binary directly with file arguments
+exec "$BINARY" "${args[@]}"

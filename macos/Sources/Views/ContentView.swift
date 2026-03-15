@@ -2,9 +2,17 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var editorState = EditorState()
+    @State private var showFindBar = false
+    @State private var showReplace = false
 
     var body: some View {
         VStack(spacing: 0) {
+            if showFindBar {
+                FindBarView(editor: editorState.editor,
+                            isVisible: $showFindBar,
+                            showReplace: $showReplace)
+            }
+
             EditorView(editor: editorState.editor)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -20,9 +28,25 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile)) { _ in
             saveAsFile()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFilePath)) { notification in
-            if let path = notification.object as? String {
-                _ = editorState.editor.openFile(path: path)
+        .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind)) { _ in
+            showFindBar.toggle()
+            if !showFindBar { showReplace = false }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext)) { _ in
+            // Handled via FindBarView binding
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev)) { _ in
+            // Handled via FindBarView binding
+        }
+        .onAppear {
+            // Check command-line arguments for a file path
+            for arg in ProcessInfo.processInfo.arguments.dropFirst() {
+                let path = arg.hasPrefix("/") ? arg
+                    : FileManager.default.currentDirectoryPath + "/" + arg
+                if FileManager.default.fileExists(atPath: path) {
+                    _ = editorState.editor.openFile(path: path)
+                    break
+                }
             }
         }
     }

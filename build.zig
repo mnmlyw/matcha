@@ -63,6 +63,7 @@ pub fn build(b: *std.Build) void {
         \\  macos/Sources/Views/ContentView.swift \
         \\  macos/Sources/Views/EditorView.swift \
         \\  macos/Sources/Views/MetalEditorView.swift \
+        \\  macos/Sources/Views/FindBarView.swift \
         \\  macos/Sources/Views/StatusBarView.swift \
         \\  macos/Sources/Renderer/MetalRenderer.swift \
         \\  macos/Sources/Input/KeyEventHandler.swift

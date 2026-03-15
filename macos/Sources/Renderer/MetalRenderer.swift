@@ -120,6 +120,7 @@ class MetalRenderer {
         let cursors = editor.getCursors()
         let selections = editor.getSelections()
         let lineNumbers = editor.getLineNumbers()
+        let bracketHighlights = editor.getBracketHighlights()
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
 
@@ -142,6 +143,15 @@ class MetalRenderer {
             let sel = selections[i]
             let rgba = colorToRGBA(sel.color)
             appendQuad(&bgQuads, x: sel.x, y: sel.y, w: sel.w, h: sel.h,
+                       r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a,
+                       viewWidth: viewWidth, viewHeight: viewHeight)
+        }
+
+        // Bracket highlights
+        for i in 0..<bracketHighlights.count {
+            let bh = bracketHighlights[i]
+            let rgba = colorToRGBA(bh.color)
+            appendQuad(&bgQuads, x: bh.x, y: bh.y, w: bh.w, h: bh.h,
                        r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a,
                        viewWidth: viewWidth, viewHeight: viewHeight)
         }

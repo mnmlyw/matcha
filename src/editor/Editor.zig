@@ -186,7 +186,30 @@ pub const Editor = struct {
     }
 
     pub fn newline(self: *Editor) !void {
-        try self.insertText("\n");
+        // Auto-indent: copy leading whitespace from current line
+        const line_start = self.buffer.lineStart(self.cursor.line);
+        const line_end = self.buffer.lineEnd(self.cursor.line);
+        var indent_len: u32 = 0;
+        while (indent_len < (line_end - line_start)) {
+            const b = self.buffer.byteAt(line_start + indent_len) orelse break;
+            if (b != ' ' and b != '\t') break;
+            indent_len += 1;
+        }
+        // Don't indent more than cursor column
+        indent_len = @min(indent_len, self.cursor.col);
+
+        if (indent_len == 0) {
+            try self.insertText("\n");
+        } else {
+            var buf: [257]u8 = undefined;
+            buf[0] = '\n';
+            const copy_len = @min(indent_len, 256);
+            var i: u32 = 0;
+            while (i < copy_len) : (i += 1) {
+                buf[i + 1] = self.buffer.byteAt(line_start + i) orelse ' ';
+            }
+            try self.insertText(buf[0 .. i + 1]);
+        }
     }
 
     fn deleteSelection(self: *Editor) !void {
@@ -485,6 +508,271 @@ pub const Editor = struct {
 
         self.cursor.moveTo(clamped_line, col);
         self.clampCursorCol();
+    }
+
+    // ── Multi-click ─────────────────────────────────────────────
+
+    pub fn doubleClick(self: *Editor, x: f32, y: f32) void {
+        const pos = self.screenToLineCol(x, y);
+        self.selectWordAt(pos.line, pos.col);
+    }
+
+    pub fn tripleClick(self: *Editor, x: f32, y: f32) void {
+        const pos = self.screenToLineCol(x, y);
+        self.selectLineAt(pos.line);
+    }
+
+    fn selectWordAt(self: *Editor, line: u32, col: u32) void {
+        const clamped_line = @min(line, self.buffer.lineCount() -| 1);
+        const line_start = self.buffer.lineStart(clamped_line);
+        const line_end = self.buffer.lineEnd(clamped_line);
+        const line_len = line_end - line_start;
+        const clamped_col = @min(col, line_len);
+
+        var start = clamped_col;
+        while (start > 0) {
+            const b = self.buffer.byteAt(line_start + start - 1) orelse break;
+            if (isWordSeparator(b) or b == '\n') break;
+            start -= 1;
+        }
+
+        var end = clamped_col;
+        while (end < line_len) {
+            const b = self.buffer.byteAt(line_start + end) orelse break;
+            if (isWordSeparator(b) or b == '\n') break;
+            end += 1;
+        }
+
+        if (start == end) {
+            // On whitespace/separator — select the separator run instead
+            start = clamped_col;
+            end = clamped_col;
+            while (start > 0) {
+                const b = self.buffer.byteAt(line_start + start - 1) orelse break;
+                if (!isWordSeparator(b) or b == '\n') break;
+                start -= 1;
+            }
+            while (end < line_len) {
+                const b = self.buffer.byteAt(line_start + end) orelse break;
+                if (!isWordSeparator(b) or b == '\n') break;
+                end += 1;
+            }
+        }
+
+        self.selection.setAnchor(clamped_line, start);
+        self.cursor.moveTo(clamped_line, end);
+    }
+
+    fn selectLineAt(self: *Editor, line: u32) void {
+        const clamped_line = @min(line, self.buffer.lineCount() -| 1);
+        self.selection.setAnchor(clamped_line, 0);
+        if (clamped_line < self.buffer.lineCount() -| 1) {
+            self.cursor.moveTo(clamped_line + 1, 0);
+        } else {
+            const line_len = self.buffer.lineEnd(clamped_line) - self.buffer.lineStart(clamped_line);
+            self.cursor.moveTo(clamped_line, line_len);
+        }
+    }
+
+    // ── Bracket matching ────────────────────────────────────────
+
+    pub const LineCol = struct { line: u32, col: u32 };
+
+    pub fn findMatchingBracket(self: *const Editor) ?LineCol {
+        const line_start = self.buffer.lineStart(self.cursor.line);
+        // Check character at cursor and before cursor
+        const at_cursor = self.buffer.byteAt(line_start + self.cursor.col);
+        const before_cursor = if (self.cursor.col > 0) self.buffer.byteAt(line_start + self.cursor.col - 1) else null;
+
+        if (at_cursor) |ch| {
+            if (bracketInfo(ch)) |info| {
+                return self.scanForBracket(self.cursor.line, self.cursor.col, info.match, info.forward);
+            }
+        }
+        if (before_cursor) |ch| {
+            if (bracketInfo(ch)) |info| {
+                return self.scanForBracket(self.cursor.line, self.cursor.col - 1, info.match, info.forward);
+            }
+        }
+        return null;
+    }
+
+    const BracketInfo = struct { match: u8, forward: bool };
+
+    fn bracketInfo(ch: u8) ?BracketInfo {
+        return switch (ch) {
+            '(' => .{ .match = ')', .forward = true },
+            '[' => .{ .match = ']', .forward = true },
+            '{' => .{ .match = '}', .forward = true },
+            ')' => .{ .match = '(', .forward = false },
+            ']' => .{ .match = '[', .forward = false },
+            '}' => .{ .match = '{', .forward = false },
+            else => null,
+        };
+    }
+
+    fn scanForBracket(self: *const Editor, start_line: u32, start_col: u32, target: u8, forward: bool) ?LineCol {
+        const start_pos = self.buffer.lineStart(start_line) + start_col;
+        const open_ch = self.buffer.byteAt(start_pos) orelse return null;
+        var depth: i32 = 0;
+        const total = self.buffer.totalLength();
+
+        if (forward) {
+            var pos = start_pos;
+            while (pos < total) : (pos += 1) {
+                const b = self.buffer.byteAt(pos) orelse break;
+                if (b == open_ch) {
+                    depth += 1;
+                } else if (b == target) {
+                    depth -= 1;
+                    if (depth == 0) {
+                        const lc = self.buffer.posToLineCol(pos);
+                        return .{ .line = lc.line, .col = lc.col };
+                    }
+                }
+            }
+        } else {
+            var pos: i64 = @intCast(start_pos);
+            while (pos >= 0) : (pos -= 1) {
+                const b = self.buffer.byteAt(@intCast(pos)) orelse break;
+                if (b == open_ch) {
+                    depth += 1;
+                } else if (b == target) {
+                    depth -= 1;
+                    if (depth == 0) {
+                        const lc = self.buffer.posToLineCol(@intCast(pos));
+                        return .{ .line = lc.line, .col = lc.col };
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    fn screenToLineCol(self: *const Editor, x: f32, y: f32) LineCol {
+        const gutter_w = self.gutterWidth();
+        const text_x = @max(0, x - gutter_w);
+        const col: u32 = @intFromFloat(@max(0, (text_x + self.scroll_x) / self.cell_width));
+        const line: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
+        const max_line = self.buffer.lineCount() -| 1;
+        return .{ .line = @min(line, max_line), .col = col };
+    }
+
+    // ── Find & Replace ──────────────────────────────────────────
+
+    pub fn findNext(self: *Editor, query: []const u8) bool {
+        if (query.len == 0) return false;
+        const total = self.buffer.totalLength();
+        if (total == 0) return false;
+
+        // Start searching from position after cursor
+        const start_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        var search_pos = if (self.selection.active) start_pos else start_pos;
+
+        // Search forward from cursor, wrapping around
+        var checked: u32 = 0;
+        while (checked < total) {
+            if (search_pos >= total) search_pos = 0;
+            const b = self.buffer.byteAt(search_pos) orelse break;
+            if (b == query[0]) {
+                if (self.matchAt(search_pos, query)) {
+                    const start_lc = self.buffer.posToLineCol(search_pos);
+                    const end_pos = search_pos + @as(u32, @intCast(query.len));
+                    const end_lc = self.buffer.posToLineCol(end_pos);
+                    self.selection.setAnchor(start_lc.line, start_lc.col);
+                    self.cursor.moveTo(end_lc.line, end_lc.col);
+                    self.ensureCursorVisible();
+                    return true;
+                }
+            }
+            search_pos += 1;
+            checked += 1;
+        }
+        return false;
+    }
+
+    pub fn findPrev(self: *Editor, query: []const u8) bool {
+        if (query.len == 0) return false;
+        const total = self.buffer.totalLength();
+        if (total == 0) return false;
+
+        const cursor_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        // Start from before selection start if active
+        var start: i64 = undefined;
+        if (self.selection.active) {
+            const r = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+            start = @as(i64, self.buffer.lineColToPos(r.start_line, r.start_col)) - 1;
+        } else {
+            start = @as(i64, cursor_pos) - 1;
+        }
+        if (start < 0) start = @as(i64, total) - 1;
+
+        var checked: u32 = 0;
+        while (checked < total) {
+            if (start < 0) start = @as(i64, total) - 1;
+            const pos: u32 = @intCast(start);
+            const b = self.buffer.byteAt(pos) orelse break;
+            if (b == query[0]) {
+                if (self.matchAt(pos, query)) {
+                    const start_lc = self.buffer.posToLineCol(pos);
+                    const end_pos = pos + @as(u32, @intCast(query.len));
+                    const end_lc = self.buffer.posToLineCol(end_pos);
+                    self.selection.setAnchor(start_lc.line, start_lc.col);
+                    self.cursor.moveTo(end_lc.line, end_lc.col);
+                    self.ensureCursorVisible();
+                    return true;
+                }
+            }
+            start -= 1;
+            checked += 1;
+        }
+        return false;
+    }
+
+    pub fn replaceNext(self: *Editor, query: []const u8, replacement: []const u8) !bool {
+        // If current selection matches query, replace it, then find next
+        if (self.selection.active) {
+            const sel_text = self.getSelectionText();
+            if (sel_text) |text| {
+                defer self.allocator.free(text);
+                if (std.mem.eql(u8, text, query)) {
+                    try self.deleteSelection();
+                    try self.insertText(replacement);
+                    _ = self.findNext(query);
+                    return true;
+                }
+            }
+        }
+        // Otherwise just find next
+        return self.findNext(query);
+    }
+
+    pub fn replaceAll(self: *Editor, query: []const u8, replacement: []const u8) !u32 {
+        if (query.len == 0) return 0;
+        var count: u32 = 0;
+
+        // Move to start
+        self.cursor.moveTo(0, 0);
+        self.selection.clear();
+
+        while (self.findNext(query)) {
+            try self.deleteSelection();
+            try self.insertText(replacement);
+            count += 1;
+            // Safety: prevent infinite loop if replacement contains query
+            if (count > 100_000) break;
+        }
+        return count;
+    }
+
+    fn matchAt(self: *const Editor, pos: u32, query: []const u8) bool {
+        const total = self.buffer.totalLength();
+        if (pos + @as(u32, @intCast(query.len)) > total) return false;
+        for (query, 0..) |qch, i| {
+            const b = self.buffer.byteAt(pos + @as(u32, @intCast(i))) orelse return false;
+            if (b != qch) return false;
+        }
+        return true;
     }
 
     // ── Render ─────────────────────────────────────────────────

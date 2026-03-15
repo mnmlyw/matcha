@@ -16,6 +16,7 @@ pub const RenderState = struct {
     cursors: CursorList,
     selections: RectList,
     line_numbers: RectList,
+    bracket_highlights: RectList,
 
     pub fn init(allocator: Allocator) RenderState {
         return .{
@@ -24,6 +25,7 @@ pub const RenderState = struct {
             .cursors = .{},
             .selections = .{},
             .line_numbers = .{},
+            .bracket_highlights = .{},
         };
     }
 
@@ -32,6 +34,7 @@ pub const RenderState = struct {
         self.cursors.deinit(self.allocator);
         self.selections.deinit(self.allocator);
         self.line_numbers.deinit(self.allocator);
+        self.bracket_highlights.deinit(self.allocator);
     }
 
     /// Compute render data for the visible viewport.
@@ -40,6 +43,7 @@ pub const RenderState = struct {
         self.cursors.clearRetainingCapacity();
         self.selections.clearRetainingCapacity();
         self.line_numbers.clearRetainingCapacity();
+        self.bracket_highlights.clearRetainingCapacity();
 
         const cell_w = editor.cell_width;
         const cell_h = editor.cell_height;
@@ -195,6 +199,29 @@ pub const RenderState = struct {
             .color = config.cursor_color,
             .style = 1, // beam
         }) catch {};
+
+        // Bracket matching highlights
+        if (editor.findMatchingBracket()) |match| {
+            const bracket_color: u32 = 0x585B7080; // subtle highlight
+            // Highlight the matching bracket
+            const mx = @as(f32, @floatFromInt(match.col)) * cell_w - editor.scroll_x + gutter_w;
+            const my = @as(f32, @floatFromInt(match.line)) * cell_h - editor.scroll_y;
+            self.bracket_highlights.append(self.allocator, .{
+                .x = mx,
+                .y = my,
+                .w = cell_w,
+                .h = cell_h,
+                .color = bracket_color,
+            }) catch {};
+            // Highlight the bracket at cursor
+            self.bracket_highlights.append(self.allocator, .{
+                .x = cursor_x,
+                .y = cursor_y,
+                .w = cell_w,
+                .h = cell_h,
+                .color = bracket_color,
+            }) catch {};
+        }
     }
 
     fn getLineBytesAlloc(allocator: Allocator, editor: anytype, line: u32) ![]u8 {

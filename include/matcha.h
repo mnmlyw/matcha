@@ -127,7 +127,20 @@ void matcha_editor_set_viewport(matcha_editor_t ed,
                                  float cell_width, float cell_height);
 void matcha_editor_scroll(matcha_editor_t ed, float dx, float dy);
 void matcha_editor_click(matcha_editor_t ed, float x, float y, bool extend);
+void matcha_editor_double_click(matcha_editor_t ed, float x, float y);
+void matcha_editor_triple_click(matcha_editor_t ed, float x, float y);
 float matcha_editor_get_scroll_y(matcha_editor_t ed);
+
+// Find & Replace
+bool matcha_editor_find_next(matcha_editor_t ed, const char* query, uint32_t len);
+bool matcha_editor_find_prev(matcha_editor_t ed, const char* query, uint32_t len);
+bool matcha_editor_replace_next(matcha_editor_t ed, const char* query, uint32_t q_len,
+                                 const char* replacement, uint32_t r_len);
+uint32_t matcha_editor_replace_all(matcha_editor_t ed, const char* query, uint32_t q_len,
+                                    const char* replacement, uint32_t r_len);
+
+// Bracket highlights
+const matcha_render_rect_s* matcha_editor_get_bracket_highlights(matcha_editor_t ed, uint32_t* count);
 
 // Render
 void matcha_editor_prepare_render(matcha_editor_t ed);

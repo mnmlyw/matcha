@@ -42,11 +42,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         matcha_init()
     }
-
-    func application(_ application: NSApplication, open urls: [URL]) {
-        guard let url = urls.first, url.isFileURL else { return }
-        NotificationCenter.default.post(name: .matchaOpenFilePath, object: url.path)
-    }
 }
 
 extension Notification.Name {
@@ -54,5 +49,7 @@ extension Notification.Name {
     static let matchaOpenFile = Notification.Name("matchaOpenFile")
     static let matchaSaveFile = Notification.Name("matchaSaveFile")
     static let matchaSaveAsFile = Notification.Name("matchaSaveAsFile")
-    static let matchaOpenFilePath = Notification.Name("matchaOpenFilePath")
+    static let matchaToggleFind = Notification.Name("matchaToggleFind")
+    static let matchaFindNext = Notification.Name("matchaFindNext")
+    static let matchaFindPrev = Notification.Name("matchaFindPrev")
 }

@@ -146,9 +146,65 @@ class MatchaEditor: ObservableObject {
         updateInfo()
     }
 
+    func doubleClick(x: Float, y: Float) {
+        guard let h = handle else { return }
+        matcha_editor_double_click(h, x, y)
+        updateInfo()
+    }
+
+    func tripleClick(x: Float, y: Float) {
+        guard let h = handle else { return }
+        matcha_editor_triple_click(h, x, y)
+        updateInfo()
+    }
+
     func getScrollY() -> Float {
         guard let h = handle else { return 0 }
         return matcha_editor_get_scroll_y(h)
+    }
+
+    // MARK: - Find & Replace
+
+    func findNext(query: String) -> Bool {
+        guard let h = handle else { return false }
+        return query.withCString { ptr in
+            let result = matcha_editor_find_next(h, ptr, UInt32(query.utf8.count))
+            updateInfo()
+            return result
+        }
+    }
+
+    func findPrev(query: String) -> Bool {
+        guard let h = handle else { return false }
+        return query.withCString { ptr in
+            let result = matcha_editor_find_prev(h, ptr, UInt32(query.utf8.count))
+            updateInfo()
+            return result
+        }
+    }
+
+    func replaceNext(query: String, replacement: String) -> Bool {
+        guard let h = handle else { return false }
+        return query.withCString { qPtr in
+            replacement.withCString { rPtr in
+                let result = matcha_editor_replace_next(h, qPtr, UInt32(query.utf8.count),
+                                                        rPtr, UInt32(replacement.utf8.count))
+                updateInfo()
+                return result
+            }
+        }
+    }
+
+    func replaceAll(query: String, replacement: String) -> UInt32 {
+        guard let h = handle else { return 0 }
+        return query.withCString { qPtr in
+            replacement.withCString { rPtr in
+                let result = matcha_editor_replace_all(h, qPtr, UInt32(query.utf8.count),
+                                                       rPtr, UInt32(replacement.utf8.count))
+                updateInfo()
+                return result
+            }
+        }
     }
 
     // MARK: - Render
@@ -189,6 +245,15 @@ class MatchaEditor: ObservableObject {
         guard let h = handle else { return UnsafeBufferPointer(start: nil, count: 0) }
         var count: UInt32 = 0
         guard let ptr = matcha_editor_get_line_number_cells(h, &count) else {
+            return UnsafeBufferPointer(start: nil, count: 0)
+        }
+        return UnsafeBufferPointer(start: ptr, count: Int(count))
+    }
+
+    func getBracketHighlights() -> UnsafeBufferPointer<matcha_render_rect_s> {
+        guard let h = handle else { return UnsafeBufferPointer(start: nil, count: 0) }
+        var count: UInt32 = 0
+        guard let ptr = matcha_editor_get_bracket_highlights(h, &count) else {
             return UnsafeBufferPointer(start: nil, count: 0)
         }
         return UnsafeBufferPointer(start: ptr, count: Int(count))

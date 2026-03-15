@@ -277,6 +277,44 @@ export fn matcha_editor_key_event(ed: ?*Editor, key: InputKey) bool {
     return false;
 }
 
+// ── Find & Replace ─────────────────────────────────────────
+
+export fn matcha_editor_find_next(ed: ?*Editor, query: ?[*]const u8, len: u32) bool {
+    const e = ed orelse return false;
+    const q = query orelse return false;
+    return e.findNext(q[0..len]);
+}
+
+export fn matcha_editor_find_prev(ed: ?*Editor, query: ?[*]const u8, len: u32) bool {
+    const e = ed orelse return false;
+    const q = query orelse return false;
+    return e.findPrev(q[0..len]);
+}
+
+export fn matcha_editor_replace_next(ed: ?*Editor, query: ?[*]const u8, q_len: u32, replacement: ?[*]const u8, r_len: u32) bool {
+    const e = ed orelse return false;
+    const q = query orelse return false;
+    const r = replacement orelse return false;
+    return e.replaceNext(q[0..q_len], r[0..r_len]) catch false;
+}
+
+export fn matcha_editor_replace_all(ed: ?*Editor, query: ?[*]const u8, q_len: u32, replacement: ?[*]const u8, r_len: u32) u32 {
+    const e = ed orelse return 0;
+    const q = query orelse return 0;
+    const r = replacement orelse return 0;
+    return e.replaceAll(q[0..q_len], r[0..r_len]) catch 0;
+}
+
+// ── Bracket highlights ────────────────────────────────────────
+
+export fn matcha_editor_get_bracket_highlights(ed: ?*Editor, count: ?*u32) ?[*]const Cell.RenderRect {
+    const e = ed orelse return null;
+    const items = e.render_state.bracket_highlights.items;
+    if (count) |c| c.* = @intCast(items.len);
+    if (items.len == 0) return null;
+    return items.ptr;
+}
+
 // ── Viewport ───────────────────────────────────────────────────
 
 export fn matcha_editor_set_viewport(ed: ?*Editor, width: u32, height: u32, cell_w: f32, cell_h: f32) void {
@@ -289,6 +327,14 @@ export fn matcha_editor_scroll(ed: ?*Editor, dx: f32, dy: f32) void {
 
 export fn matcha_editor_click(ed: ?*Editor, x: f32, y: f32, extend: bool) void {
     if (ed) |e| e.click(x, y, extend);
+}
+
+export fn matcha_editor_double_click(ed: ?*Editor, x: f32, y: f32) void {
+    if (ed) |e| e.doubleClick(x, y);
+}
+
+export fn matcha_editor_triple_click(ed: ?*Editor, x: f32, y: f32) void {
+    if (ed) |e| e.tripleClick(x, y);
 }
 
 export fn matcha_editor_get_scroll_y(ed: ?*Editor) f32 {
