@@ -29,6 +29,12 @@ class MatchaEditor: ObservableObject {
 
     // MARK: - File I/O
 
+    func newFile() {
+        guard let h = handle else { return }
+        matcha_editor_new_file(h)
+        updateInfo()
+    }
+
     func openFile(path: String) -> Bool {
         guard let h = handle else { return false }
         let result = matcha_editor_open_file(h, path)

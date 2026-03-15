@@ -8,12 +8,12 @@ struct StatusBarView: View {
             // Filename
             Text(editor.info.filename.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Untitled")
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundColor(Color(hex: 0xCDD6F4FF))
+                .foregroundColor(Color(hex: 0xFFFFFFFF))
 
             if editor.info.modified {
                 Text("Modified")
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(Color(hex: 0xF38BA8FF))
+                    .foregroundColor(Color(hex: 0xFF6E5EFF)) // red
             }
 
             Spacer()
@@ -21,15 +21,15 @@ struct StatusBarView: View {
             // Line:Col
             Text("Ln \(editor.info.cursorLine), Col \(editor.info.cursorCol)")
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(Color(hex: 0xBAC2DEFF))
+                .foregroundColor(Color(hex: 0x7B8496FF)) // grey
 
             // Total lines
             Text("\(editor.info.totalLines) lines")
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(Color(hex: 0x6C7086FF))
+                .foregroundColor(Color(hex: 0x7B8496FF)) // grey
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
-        .background(Color(hex: 0x11111BFF))
+        .background(Color(hex: 0x16181AFF)) // bg
     }
 }

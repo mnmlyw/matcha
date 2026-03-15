@@ -11,18 +11,18 @@ pub const TokenType = enum {
     attribute,
 };
 
-/// Catppuccin Mocha–inspired syntax theme. All colors are RGBA u32.
+/// Cyberdream syntax theme. All colors are RGBA u32.
 pub const Theme = struct {
-    normal: u32 = 0xCDD6F4FF, // text
-    keyword: u32 = 0xCBA6F7FF, // mauve
-    string: u32 = 0xA6E3A1FF, // green
-    comment: u32 = 0x6C7086FF, // overlay0
-    number: u32 = 0xFAB387FF, // peach
-    typ: u32 = 0x89DCEBFF, // sky
-    function: u32 = 0x89B4FAFF, // blue
-    operator: u32 = 0x94E2D5FF, // teal
-    punctuation: u32 = 0xBAC2DEFF, // subtext0
-    attribute: u32 = 0xF9E2AFFF, // yellow
+    normal: u32 = 0xFFFFFFFF, // fg
+    keyword: u32 = 0xFFBD5EFF, // orange
+    string: u32 = 0x5EFF6CFF, // green
+    comment: u32 = 0x7B8496FF, // grey
+    number: u32 = 0xFFBD5EFF, // orange
+    typ: u32 = 0xBD5EFFFF, // purple
+    function: u32 = 0x5EA1FFFF, // blue
+    operator: u32 = 0xBD5EFFFF, // purple
+    punctuation: u32 = 0xFFFFFFFF, // fg
+    attribute: u32 = 0x5EF1FFFF, // cyan
 
     pub fn colorFor(self: *const Theme, token: TokenType) u32 {
         return switch (token) {

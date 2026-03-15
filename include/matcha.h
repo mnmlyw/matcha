@@ -74,6 +74,7 @@ matcha_editor_t matcha_editor_new(matcha_config_t cfg);
 void matcha_editor_free(matcha_editor_t ed);
 
 // File I/O
+void matcha_editor_new_file(matcha_editor_t ed);
 bool matcha_editor_open_file(matcha_editor_t ed, const char* path);
 bool matcha_editor_save(matcha_editor_t ed);
 bool matcha_editor_save_as(matcha_editor_t ed, const char* path);

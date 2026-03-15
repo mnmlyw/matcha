@@ -18,7 +18,10 @@ struct ContentView: View {
 
             StatusBarView(editor: editorState.editor)
         }
-        .background(Color(hex: 0x1E1E2EFF))
+        .background(Color(hex: 0x16181AFF))
+        .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile)) { _ in
+            editorState.editor.newFile()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile)) { _ in
             openFile()
         }

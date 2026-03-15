@@ -62,6 +62,25 @@ pub const Editor = struct {
 
     // ── File I/O ───────────────────────────────────────────────
 
+    pub fn newFile(self: *Editor) void {
+        self.buffer.deinit();
+        self.buffer = PieceTable.init(self.allocator);
+        self.cursor = .{};
+        self.selection = .{};
+        self.undo_stack.deinit();
+        self.undo_stack = UndoStack.init(self.allocator);
+        self.modified = false;
+        self.scroll_x = 0;
+        self.scroll_y = 0;
+        self.language = .none;
+        self.edit_counter +%= 1;
+        if (self.filename_owned) {
+            if (self.filename) |f| self.allocator.free(f);
+        }
+        self.filename = null;
+        self.filename_owned = false;
+    }
+
     pub fn openFile(self: *Editor, path: []const u8) !void {
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();

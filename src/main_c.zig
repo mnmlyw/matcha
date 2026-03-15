@@ -95,6 +95,11 @@ export fn matcha_editor_free(ed: ?*Editor) void {
 
 // ── File I/O ───────────────────────────────────────────────────
 
+export fn matcha_editor_new_file(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.newFile();
+}
+
 export fn matcha_editor_open_file(ed: ?*Editor, path: ?[*:0]const u8) bool {
     const e = ed orelse return false;
     const p = path orelse return false;

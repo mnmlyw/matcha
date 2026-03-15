@@ -35,7 +35,7 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         self.isPaused = false
         self.enableSetNeedsDisplay = false
         self.preferredFramesPerSecond = 60
-        self.clearColor = MTLClearColor(red: 0.118, green: 0.118, blue: 0.180, alpha: 1.0)
+        self.clearColor = MTLClearColor(red: 22.0/255.0, green: 24.0/255.0, blue: 26.0/255.0, alpha: 1.0)
 
         // Calculate cell dimensions from font (in points)
         calculateCellDimensions()
@@ -52,6 +52,9 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         // Prevent stretching/blurring during live resize
         self.layerContentsPlacement = .topLeft
         self.layer?.isOpaque = true
+
+        // Register for file drag & drop
+        registerForDraggedTypes([.fileURL])
 
         self.becomeFirstResponder()
         startCursorBlink()
@@ -268,5 +271,21 @@ class MetalEditorView: MTKView, MTKViewDelegate {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .iBeam)
+    }
+
+    // MARK: - Drag & Drop
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) {
+            return .copy
+        }
+        return []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              let url = urls.first else { return false }
+        return editor.openFile(path: url.path)
     }
 }

@@ -83,7 +83,7 @@ struct FindBarView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color(hex: 0x181825FF))
+        .background(Color(hex: 0x1E2124FF)) // bg_alt
         .onAppear {
             searchFieldFocused = true
             // Pre-fill with selection if available
