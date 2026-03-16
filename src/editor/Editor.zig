@@ -39,6 +39,15 @@ pub const Editor = struct {
     // Syntax highlighting
     language: Language = .none,
 
+    // Error feedback
+    error_msg: [64]u8 = [_]u8{0} ** 64,
+    has_error: bool = false,
+
+    // Wrap cache: prefix_sums[i] = total visual rows for lines 0..i-1
+    wrap_prefix_sums: std.ArrayListUnmanaged(u32) = .{},
+    wrap_cache_edit_counter: u32 = 0xFFFFFFFF,
+    wrap_cache_wrap_col: u32 = 0,
+
     pub fn init(allocator: Allocator, config: *const Config) Editor {
         return .{
             .allocator = allocator,
@@ -55,9 +64,24 @@ pub const Editor = struct {
         self.buffer.deinit();
         self.undo_stack.deinit();
         self.render_state.deinit();
+        self.wrap_prefix_sums.deinit(self.allocator);
         if (self.filename_owned) {
             if (self.filename) |f| self.allocator.free(f);
         }
+    }
+
+    // ── Error feedback ────────────────────────────────────────
+
+    pub fn setLastError(self: *Editor, err: anyerror) void {
+        const name = @errorName(err);
+        const len = @min(name.len, 63);
+        @memcpy(self.error_msg[0..len], name[0..len]);
+        self.error_msg[len] = 0;
+        self.has_error = true;
+    }
+
+    pub fn clearLastError(self: *Editor) void {
+        self.has_error = false;
     }
 
     // ── File I/O ───────────────────────────────────────────────
@@ -74,6 +98,8 @@ pub const Editor = struct {
         self.scroll_y = 0;
         self.language = .none;
         self.edit_counter +%= 1;
+        self.has_error = false;
+        self.wrap_cache_edit_counter = 0xFFFFFFFF;
         if (self.filename_owned) {
             if (self.filename) |f| self.allocator.free(f);
         }
@@ -167,23 +193,24 @@ pub const Editor = struct {
         const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
         if (pos == 0) return;
 
-        // Get the byte we're deleting for undo
-        const del_byte = self.buffer.byteAt(pos - 1) orelse return;
+        // Find start of previous codepoint
+        const prev_pos = self.buffer.prevCodepointStart(pos);
+        const del_len = pos - prev_pos;
+
+        // Get the bytes we're deleting for undo
+        const del_bytes = try self.buffer.getRange(self.allocator, prev_pos, pos);
+        defer self.allocator.free(del_bytes);
 
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
-        try self.undo_stack.record(.delete, pos - 1, &.{del_byte});
+        try self.undo_stack.record(.delete, prev_pos, del_bytes);
 
-        try self.buffer.delete(pos - 1, 1);
+        try self.buffer.delete(prev_pos, del_len);
         self.modified = true;
         self.edit_counter +%= 1;
 
-        // Move cursor back
-        if (del_byte == '\n') {
-            self.cursor.line -= 1;
-            self.cursor.col = self.buffer.lineEnd(self.cursor.line) - self.buffer.lineStart(self.cursor.line);
-        } else {
-            self.cursor.col -= 1;
-        }
+        // Move cursor to deletion point
+        const lc = self.buffer.posToLineCol(prev_pos);
+        self.cursor.moveTo(lc.line, lc.col);
         self.cursor.target_col = self.cursor.col;
 
         try self.undo_stack.commit();
@@ -199,12 +226,17 @@ pub const Editor = struct {
         const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
         if (pos >= self.buffer.totalLength()) return;
 
-        const del_byte = self.buffer.byteAt(pos) orelse return;
+        // Find end of codepoint at current position
+        const next_pos = self.buffer.nextCodepointStart(pos);
+        const del_len = next_pos - pos;
+
+        const del_bytes = try self.buffer.getRange(self.allocator, pos, next_pos);
+        defer self.allocator.free(del_bytes);
 
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
-        try self.undo_stack.record(.delete, pos, &.{del_byte});
+        try self.undo_stack.record(.delete, pos, del_bytes);
 
-        try self.buffer.delete(pos, 1);
+        try self.buffer.delete(pos, del_len);
         self.modified = true;
         self.edit_counter +%= 1;
 
@@ -264,6 +296,92 @@ pub const Editor = struct {
         self.selection.clear();
 
         try self.undo_stack.commit();
+        self.ensureCursorVisible();
+    }
+
+    // ── Tab / Indent ──────────────────────────────────────────
+
+    pub fn insertTab(self: *Editor) !void {
+        if (self.selection.active) {
+            const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+            var spaces: [16]u8 = [_]u8{' '} ** 16;
+            const n: u32 = @min(self.config.tab_size, 16);
+
+            self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+
+            var line = range.start_line;
+            while (line <= range.end_line) : (line += 1) {
+                const ls = self.buffer.lineStart(line);
+                self.undo_stack.record(.insert, ls, spaces[0..n]) catch break;
+                self.buffer.insert(ls, spaces[0..n]) catch break;
+            }
+
+            self.undo_stack.commit() catch {};
+            self.modified = true;
+            self.edit_counter +%= 1;
+            self.cursor.col += n;
+            self.cursor.target_col = self.cursor.col;
+            self.selection.anchor_col += n;
+        } else {
+            var spaces: [16]u8 = [_]u8{' '} ** 16;
+            const n = @min(self.config.tab_size, 16);
+            if (self.config.insert_spaces) {
+                try self.insertText(spaces[0..n]);
+            } else {
+                try self.insertText("\t");
+            }
+        }
+    }
+
+    pub fn dedent(self: *Editor) !void {
+        var start_line = self.cursor.line;
+        var end_line = self.cursor.line;
+        if (self.selection.active) {
+            const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+            start_line = range.start_line;
+            end_line = range.end_line;
+        }
+
+        const tab = self.config.tab_size;
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        var did_change = false;
+
+        var line = start_line;
+        while (line <= end_line) : (line += 1) {
+            const ls = self.buffer.lineStart(line);
+            const le = self.buffer.lineEnd(line);
+            var remove: u32 = 0;
+            while (remove < tab and ls + remove < le) {
+                const b = self.buffer.byteAt(ls + remove) orelse break;
+                if (b == ' ') {
+                    remove += 1;
+                } else if (b == '\t') {
+                    remove += 1;
+                    break;
+                } else break;
+            }
+            if (remove > 0) {
+                const deleted = self.buffer.getRange(self.allocator, ls, ls + remove) catch break;
+                defer self.allocator.free(deleted);
+                self.undo_stack.record(.delete, ls, deleted) catch break;
+                self.buffer.delete(ls, remove) catch break;
+                did_change = true;
+
+                if (self.cursor.line == line) {
+                    self.cursor.col -|= remove;
+                }
+                if (self.selection.active and self.selection.anchor_line == line) {
+                    self.selection.anchor_col -|= remove;
+                }
+            }
+        }
+
+        if (did_change) {
+            self.undo_stack.commit() catch {};
+            self.modified = true;
+            self.edit_counter +%= 1;
+        }
+        self.cursor.target_col = self.cursor.col;
         self.ensureCursorVisible();
     }
 
@@ -489,36 +607,39 @@ pub const Editor = struct {
     }
 
     pub fn scroll(self: *Editor, dx: f32, dy: f32) void {
-        self.scroll_x = @max(0, self.scroll_x + dx);
-        self.scroll_y = @max(0, self.scroll_y + dy);
+        if (self.config.wrap_lines) {
+            self.scroll_y = @max(0, self.scroll_y + dy);
+        } else {
+            self.scroll_x = @max(0, self.scroll_x + dx);
+            self.scroll_y = @max(0, self.scroll_y + dy);
+        }
         self.clampScroll();
     }
 
     fn clampScroll(self: *Editor) void {
-        const gutter_w = self.gutterWidth();
-        const view_w = @as(f32, @floatFromInt(self.viewport_width)) - gutter_w;
         const view_h = @as(f32, @floatFromInt(self.viewport_height));
 
-        // Vertical: stop when last line is visible
-        const total_h = @as(f32, @floatFromInt(self.buffer.lineCount())) * self.cell_height;
+        // Vertical: use visual rows when wrapping
+        const total_vrows = if (self.config.wrap_lines) self.totalVisualRows() else self.buffer.lineCount();
+        const total_h = @as(f32, @floatFromInt(total_vrows)) * self.cell_height;
         const max_scroll_y = @max(0, total_h - view_h);
         self.scroll_y = @min(self.scroll_y, max_scroll_y);
 
-        // Horizontal: use max visible line length from last render
-        const content_w = @as(f32, @floatFromInt(self.max_visible_line_len)) * self.cell_width;
-        const max_scroll_x = @max(0, content_w - view_w);
-        self.scroll_x = @min(self.scroll_x, max_scroll_x);
+        // Horizontal: disabled when wrapping
+        if (self.config.wrap_lines) {
+            self.scroll_x = 0;
+        } else {
+            const gutter_w = self.gutterWidth();
+            const view_w = @as(f32, @floatFromInt(self.viewport_width)) - gutter_w;
+            const content_w = @as(f32, @floatFromInt(self.max_visible_line_len)) * self.cell_width;
+            const max_scroll_x = @max(0, content_w - view_w);
+            self.scroll_x = @min(self.scroll_x, max_scroll_x);
+        }
     }
 
     pub fn click(self: *Editor, x: f32, y: f32, extend: bool) void {
-        // Account for line number gutter
         const gutter_width = self.gutterWidth();
         const text_x = @max(0, x - gutter_width);
-
-        const col: u32 = @intFromFloat(@max(0, (text_x + self.scroll_x) / self.cell_width));
-        const line: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
-        const max_line = self.buffer.lineCount() -| 1;
-        const clamped_line = @min(line, max_line);
 
         if (extend) {
             self.startSelectionIfNeeded();
@@ -526,7 +647,21 @@ pub const Editor = struct {
             self.selection.clear();
         }
 
-        self.cursor.moveTo(clamped_line, col);
+        if (self.config.wrap_lines) {
+            const vrow: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
+            const result = self.visualRowToLine(vrow);
+            const seg_vcol: u32 = @intFromFloat(@max(0, text_x / self.cell_width));
+            const total_vcol = result.col_offset + seg_vcol;
+            const byte_col = self.visualColToByteCol(result.line, total_vcol);
+            self.cursor.moveTo(result.line, byte_col);
+        } else {
+            const vcol: u32 = @intFromFloat(@max(0, (text_x + self.scroll_x) / self.cell_width));
+            const line: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
+            const max_line = self.buffer.lineCount() -| 1;
+            const clamped_line = @min(line, max_line);
+            const byte_col = self.visualColToByteCol(clamped_line, vcol);
+            self.cursor.moveTo(clamped_line, byte_col);
+        }
         self.clampCursorCol();
     }
 
@@ -683,13 +818,25 @@ pub const Editor = struct {
         return null;
     }
 
-    fn screenToLineCol(self: *const Editor, x: f32, y: f32) LineCol {
+    fn screenToLineCol(self: *Editor, x: f32, y: f32) LineCol {
         const gutter_w = self.gutterWidth();
         const text_x = @max(0, x - gutter_w);
-        const col: u32 = @intFromFloat(@max(0, (text_x + self.scroll_x) / self.cell_width));
-        const line: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
-        const max_line = self.buffer.lineCount() -| 1;
-        return .{ .line = @min(line, max_line), .col = col };
+
+        if (self.config.wrap_lines) {
+            const vrow: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
+            const result = self.visualRowToLine(vrow);
+            const seg_vcol: u32 = @intFromFloat(@max(0, text_x / self.cell_width));
+            const total_vcol = result.col_offset + seg_vcol;
+            const byte_col = self.visualColToByteCol(result.line, total_vcol);
+            return .{ .line = result.line, .col = byte_col };
+        } else {
+            const vcol: u32 = @intFromFloat(@max(0, (text_x + self.scroll_x) / self.cell_width));
+            const line: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
+            const max_line = self.buffer.lineCount() -| 1;
+            const clamped_line = @min(line, max_line);
+            const byte_col = self.visualColToByteCol(clamped_line, vcol);
+            return .{ .line = clamped_line, .col = byte_col };
+        }
     }
 
     // ── Find & Replace ──────────────────────────────────────────
@@ -828,11 +975,157 @@ pub const Editor = struct {
         return @as(f32, @floatFromInt(digits + 1)) * self.cell_width;
     }
 
+    // ── UTF-8 column helpers ─────────────────────────────────
+
+    /// Convert byte column to visual column (codepoint count).
+    pub fn byteColToVisualCol(self: *const Editor, line: u32, byte_col: u32) u32 {
+        const line_start = self.buffer.lineStart(line);
+        var pos: u32 = 0;
+        var vcol: u32 = 0;
+        while (pos < byte_col) {
+            const b = self.buffer.byteAt(line_start + pos) orelse break;
+            if (b == '\n') break;
+            pos += PieceTable.codepointByteLen(b);
+            vcol += 1;
+        }
+        return vcol;
+    }
+
+    /// Convert visual column to byte column.
+    pub fn visualColToByteCol(self: *const Editor, line: u32, vcol: u32) u32 {
+        const line_start = self.buffer.lineStart(line);
+        const line_end = self.buffer.lineEnd(line);
+        const line_len = line_end - line_start;
+        var pos: u32 = 0;
+        var v: u32 = 0;
+        while (pos < line_len and v < vcol) {
+            const b = self.buffer.byteAt(line_start + pos) orelse break;
+            if (b == '\n') break;
+            pos += PieceTable.codepointByteLen(b);
+            v += 1;
+        }
+        return pos;
+    }
+
+    // ── Wrap helpers ──────────────────────────────────────────
+
+    /// Wrap column in visual characters.
+    pub fn wrapCol(self: *const Editor) u32 {
+        const gutter_w = self.gutterWidth();
+        const view_w = @as(f32, @floatFromInt(self.viewport_width)) - gutter_w;
+        if (view_w <= 0 or self.cell_width <= 0) return 80;
+        return @max(1, @as(u32, @intFromFloat(view_w / self.cell_width)));
+    }
+
+    /// Ensure the wrap prefix-sum cache is up to date.
+    fn ensureWrapCache(self: *Editor) void {
+        const wc = if (self.config.wrap_lines) self.wrapCol() else 0;
+        if (self.wrap_cache_edit_counter == self.edit_counter and self.wrap_cache_wrap_col == wc) return;
+        self.rebuildWrapCache(wc);
+    }
+
+    /// Rebuild wrap cache by scanning all piece bytes in one pass.
+    fn rebuildWrapCache(self: *Editor, wc: u32) void {
+        const line_count = self.buffer.lineCount();
+        self.wrap_prefix_sums.clearRetainingCapacity();
+        self.wrap_prefix_sums.ensureTotalCapacity(self.allocator, line_count + 1) catch return;
+
+        if (!self.config.wrap_lines or wc == 0) {
+            // No wrapping: visual row i = line i
+            var i: u32 = 0;
+            while (i <= line_count) : (i += 1) {
+                self.wrap_prefix_sums.appendAssumeCapacity(i);
+            }
+        } else {
+            self.wrap_prefix_sums.appendAssumeCapacity(0);
+            var vcols: u32 = 0;
+            var running: u32 = 0;
+
+            var pi: usize = 0;
+            while (pi < self.buffer.pieceCount()) : (pi += 1) {
+                const slice = self.buffer.pieceBytes(pi);
+                for (slice) |b| {
+                    if (b == '\n') {
+                        const vrows = if (vcols == 0) @as(u32, 1) else @max(1, (vcols + wc - 1) / wc);
+                        running += vrows;
+                        self.wrap_prefix_sums.append(self.allocator, running) catch return;
+                        vcols = 0;
+                    } else if (b < 0x80 or b >= 0xC0) {
+                        vcols += 1;
+                    }
+                }
+            }
+            // Last line (no trailing newline)
+            if (self.wrap_prefix_sums.items.len <= line_count) {
+                const vrows = if (vcols == 0) @as(u32, 1) else @max(1, (vcols + wc - 1) / wc);
+                running += vrows;
+                self.wrap_prefix_sums.append(self.allocator, running) catch return;
+            }
+        }
+
+        self.wrap_cache_edit_counter = self.edit_counter;
+        self.wrap_cache_wrap_col = wc;
+    }
+
+    /// O(1): visual rows for a buffer line.
+    pub fn lineVisualRows(self: *Editor, line: u32) u32 {
+        if (!self.config.wrap_lines) return 1;
+        self.ensureWrapCache();
+        const sums = self.wrap_prefix_sums.items;
+        if (line + 1 < sums.len) return sums[line + 1] - sums[line];
+        return 1;
+    }
+
+    /// O(1): visual row index for the first row of a buffer line.
+    pub fn lineToVisualRow(self: *Editor, target_line: u32) u32 {
+        if (!self.config.wrap_lines) return target_line;
+        self.ensureWrapCache();
+        const sums = self.wrap_prefix_sums.items;
+        if (target_line < sums.len) return sums[target_line];
+        if (sums.len > 0) return sums[sums.len - 1];
+        return target_line;
+    }
+
+    /// O(1): total visual rows in the document.
+    pub fn totalVisualRows(self: *Editor) u32 {
+        if (!self.config.wrap_lines) return self.buffer.lineCount();
+        self.ensureWrapCache();
+        const sums = self.wrap_prefix_sums.items;
+        if (sums.len > 0) return sums[sums.len - 1];
+        return self.buffer.lineCount();
+    }
+
+    /// O(log n): convert visual row to buffer line + visual column offset.
+    pub fn visualRowToLine(self: *Editor, vrow: u32) struct { line: u32, col_offset: u32 } {
+        if (!self.config.wrap_lines) return .{ .line = @min(vrow, self.buffer.lineCount() -| 1), .col_offset = 0 };
+        self.ensureWrapCache();
+        const sums = self.wrap_prefix_sums.items;
+        if (sums.len < 2) return .{ .line = 0, .col_offset = 0 };
+
+        // Binary search: largest i where sums[i] <= vrow
+        var lo: u32 = 0;
+        var hi: u32 = @intCast(sums.len - 2);
+        while (lo < hi) {
+            const mid = lo + (hi - lo + 1) / 2;
+            if (sums[mid] <= vrow) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+
+        const segment = vrow -| sums[lo];
+        return .{ .line = lo, .col_offset = segment * self.wrapCol() };
+    }
+
     // ── Internal cursor helpers ────────────────────────────────
 
     fn moveCursorLeft(self: *Editor) void {
         if (self.cursor.col > 0) {
-            self.cursor.moveTo(self.cursor.line, self.cursor.col - 1);
+            const line_start = self.buffer.lineStart(self.cursor.line);
+            const abs_pos = line_start + self.cursor.col;
+            const prev_pos = self.buffer.prevCodepointStart(abs_pos);
+            self.cursor.moveTo(self.cursor.line, if (prev_pos >= line_start) prev_pos - line_start else 0);
         } else if (self.cursor.line > 0) {
             self.cursor.line -= 1;
             const line_len = self.buffer.lineEnd(self.cursor.line) - self.buffer.lineStart(self.cursor.line);
@@ -842,9 +1135,13 @@ pub const Editor = struct {
     }
 
     fn moveCursorRight(self: *Editor) void {
-        const line_len = self.buffer.lineEnd(self.cursor.line) - self.buffer.lineStart(self.cursor.line);
+        const line_start = self.buffer.lineStart(self.cursor.line);
+        const line_len = self.buffer.lineEnd(self.cursor.line) - line_start;
         if (self.cursor.col < line_len) {
-            self.cursor.moveTo(self.cursor.line, self.cursor.col + 1);
+            const abs_pos = line_start + self.cursor.col;
+            const next_pos = self.buffer.nextCodepointStart(abs_pos);
+            const new_col = @min(next_pos - line_start, line_len);
+            self.cursor.moveTo(self.cursor.line, new_col);
         } else if (self.cursor.line < self.buffer.lineCount() -| 1) {
             self.cursor.moveTo(self.cursor.line + 1, 0);
         }
@@ -871,18 +1168,20 @@ pub const Editor = struct {
         var pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
         if (pos == 0) return;
 
-        // Skip whitespace
-        pos -= 1;
+        // Step back one codepoint
+        pos = self.buffer.prevCodepointStart(pos);
+        // Skip separators
         while (pos > 0) {
             const b = self.buffer.byteAt(pos) orelse break;
             if (!isWordSeparator(b)) break;
-            pos -= 1;
+            pos = self.buffer.prevCodepointStart(pos);
         }
-        // Skip word characters
+        // Find start of word
         while (pos > 0) {
-            const b = self.buffer.byteAt(pos - 1) orelse break;
+            const prev = self.buffer.prevCodepointStart(pos);
+            const b = self.buffer.byteAt(prev) orelse break;
             if (isWordSeparator(b)) break;
-            pos -= 1;
+            pos = prev;
         }
 
         const lc = self.buffer.posToLineCol(pos);
@@ -899,13 +1198,13 @@ pub const Editor = struct {
         while (pos < total) {
             const b = self.buffer.byteAt(pos) orelse break;
             if (isWordSeparator(b)) break;
-            pos += 1;
+            pos = self.buffer.nextCodepointStart(pos);
         }
-        // Skip whitespace
+        // Skip separators
         while (pos < total) {
             const b = self.buffer.byteAt(pos) orelse break;
             if (!isWordSeparator(b)) break;
-            pos += 1;
+            pos = self.buffer.nextCodepointStart(pos);
         }
 
         const lc = self.buffer.posToLineCol(pos);
@@ -934,23 +1233,38 @@ pub const Editor = struct {
     }
 
     fn ensureCursorVisible(self: *Editor) void {
-        const cursor_y = @as(f32, @floatFromInt(self.cursor.line)) * self.cell_height;
-        const cursor_x = @as(f32, @floatFromInt(self.cursor.col)) * self.cell_width;
+        const vcol = self.byteColToVisualCol(self.cursor.line, self.cursor.col);
         const view_h = @as(f32, @floatFromInt(self.viewport_height));
         const view_w = @as(f32, @floatFromInt(self.viewport_width)) - self.gutterWidth();
 
-        // Vertical scrolling
-        if (cursor_y < self.scroll_y) {
-            self.scroll_y = cursor_y;
-        } else if (cursor_y + self.cell_height > self.scroll_y + view_h) {
-            self.scroll_y = cursor_y + self.cell_height - view_h;
-        }
+        if (self.config.wrap_lines) {
+            const w = self.wrapCol();
+            const base_vrow = self.lineToVisualRow(self.cursor.line);
+            const seg: u32 = if (w > 0) vcol / w else 0;
+            const cursor_vrow = base_vrow + seg;
+            const cursor_y = @as(f32, @floatFromInt(cursor_vrow)) * self.cell_height;
 
-        // Horizontal scrolling
-        if (cursor_x < self.scroll_x) {
-            self.scroll_x = cursor_x;
-        } else if (cursor_x + self.cell_width > self.scroll_x + view_w) {
-            self.scroll_x = cursor_x + self.cell_width - view_w;
+            if (cursor_y < self.scroll_y) {
+                self.scroll_y = cursor_y;
+            } else if (cursor_y + self.cell_height > self.scroll_y + view_h) {
+                self.scroll_y = cursor_y + self.cell_height - view_h;
+            }
+            self.scroll_x = 0;
+        } else {
+            const cursor_y = @as(f32, @floatFromInt(self.cursor.line)) * self.cell_height;
+            const cursor_x = @as(f32, @floatFromInt(vcol)) * self.cell_width;
+
+            if (cursor_y < self.scroll_y) {
+                self.scroll_y = cursor_y;
+            } else if (cursor_y + self.cell_height > self.scroll_y + view_h) {
+                self.scroll_y = cursor_y + self.cell_height - view_h;
+            }
+
+            if (cursor_x < self.scroll_x) {
+                self.scroll_x = cursor_x;
+            } else if (cursor_x + self.cell_width > self.scroll_x + view_w) {
+                self.scroll_x = cursor_x + self.cell_width - view_w;
+            }
         }
     }
 };
@@ -1037,4 +1351,51 @@ test "Editor: selection and get text" {
     } else {
         return error.TestExpectedSelectionText;
     }
+}
+
+test "Editor: tab insert" {
+    var config = Config.defaults();
+    config.tab_size = 4;
+    config.insert_spaces = true;
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertTab();
+    try testing.expectEqual(@as(u32, 4), ed.cursor.col);
+
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("    ", content);
+}
+
+test "Editor: dedent" {
+    var config = Config.defaults();
+    config.tab_size = 4;
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("    hello");
+    ed.moveLineStart();
+    try ed.dedent();
+
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("hello", content);
+}
+
+test "Editor: UTF-8 delete backward" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // Insert "hé" (h + 2-byte é)
+    try ed.insertText("h\xC3\xA9");
+    try testing.expectEqual(@as(u32, 3), ed.cursor.col); // 3 bytes
+
+    try ed.deleteBackward();
+    try testing.expectEqual(@as(u32, 1), ed.cursor.col); // back to 1 byte (h)
+
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("h", content);
 }

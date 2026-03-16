@@ -236,6 +236,68 @@ pub const PieceTable = struct {
         return null;
     }
 
+    /// Number of pieces in the table.
+    pub fn pieceCount(self: *const PieceTable) usize {
+        return self.pieces.items.len;
+    }
+
+    /// Direct access to a piece's byte slice (no allocation).
+    pub fn pieceBytes(self: *const PieceTable, idx: usize) []const u8 {
+        return self.sourceSlice(self.pieces.items[idx]);
+    }
+
+    // ── UTF-8 helpers ──────────────────────────────────────────
+
+    /// Returns the byte length of a UTF-8 codepoint from its leading byte.
+    pub fn codepointByteLen(byte: u8) u32 {
+        if (byte < 0x80) return 1;
+        if (byte < 0xC0) return 1; // continuation byte, treat as 1
+        if (byte < 0xE0) return 2;
+        if (byte < 0xF0) return 3;
+        return 4;
+    }
+
+    /// Walk backward from `pos` to find the start of the previous codepoint.
+    pub fn prevCodepointStart(self: *const PieceTable, pos: u32) u32 {
+        if (pos == 0) return 0;
+        var p = pos - 1;
+        while (p > 0) {
+            const b = self.byteAt(p) orelse return pos -| 1;
+            if (b < 0x80 or b >= 0xC0) return p; // ASCII or leading byte
+            p -= 1;
+        }
+        return p;
+    }
+
+    /// Return the byte position after the codepoint starting at `pos`.
+    pub fn nextCodepointStart(self: *const PieceTable, pos: u32) u32 {
+        const total = self.totalLength();
+        if (pos >= total) return total;
+        const b = self.byteAt(pos) orelse return @min(pos + 1, total);
+        return @min(pos + codepointByteLen(b), total);
+    }
+
+    /// Decode the Unicode codepoint at byte position `pos`.
+    pub fn codepointAt(self: *const PieceTable, pos: u32) u32 {
+        const b0 = self.byteAt(pos) orelse return 0xFFFD;
+        if (b0 < 0x80) return b0;
+        if (b0 < 0xC0) return 0xFFFD;
+        if (b0 < 0xE0) {
+            const b1 = self.byteAt(pos + 1) orelse return 0xFFFD;
+            return (@as(u32, b0 & 0x1F) << 6) | @as(u32, b1 & 0x3F);
+        }
+        if (b0 < 0xF0) {
+            const b1 = self.byteAt(pos + 1) orelse return 0xFFFD;
+            const b2 = self.byteAt(pos + 2) orelse return 0xFFFD;
+            return (@as(u32, b0 & 0x0F) << 12) | (@as(u32, b1 & 0x3F) << 6) | @as(u32, b2 & 0x3F);
+        }
+        const b1 = self.byteAt(pos + 1) orelse return 0xFFFD;
+        const b2 = self.byteAt(pos + 2) orelse return 0xFFFD;
+        const b3 = self.byteAt(pos + 3) orelse return 0xFFFD;
+        return (@as(u32, b0 & 0x07) << 18) | (@as(u32, b1 & 0x3F) << 12) |
+            (@as(u32, b2 & 0x3F) << 6) | @as(u32, b3 & 0x3F);
+    }
+
     /// Count newlines in the document (cached).
     pub fn lineCount(self: *const PieceTable) u32 {
         if (self.cached_line_count) |c| return c;

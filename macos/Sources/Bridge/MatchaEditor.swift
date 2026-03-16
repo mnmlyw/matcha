@@ -7,6 +7,7 @@ class MatchaEditor: ObservableObject {
     private let config: MatchaConfig
 
     @Published var info: EditorInfo = EditorInfo()
+    @Published var lastError: String? = nil
 
     struct EditorInfo {
         var cursorLine: UInt32 = 1
@@ -25,6 +26,16 @@ class MatchaEditor: ObservableObject {
         if let h = handle {
             matcha_editor_free(h)
         }
+    }
+
+    // MARK: - Error Feedback
+
+    func getLastError() -> String? {
+        guard let h = handle else { return nil }
+        guard let cStr = matcha_editor_get_last_error(h) else { return nil }
+        let str = String(cString: cStr)
+        matcha_editor_clear_error(h)
+        return str
     }
 
     // MARK: - File I/O
@@ -81,6 +92,18 @@ class MatchaEditor: ObservableObject {
     func newline() {
         guard let h = handle else { return }
         matcha_editor_newline(h)
+        updateInfo()
+    }
+
+    func insertTab() {
+        guard let h = handle else { return }
+        matcha_editor_insert_tab(h)
+        updateInfo()
+    }
+
+    func dedent() {
+        guard let h = handle else { return }
+        matcha_editor_dedent(h)
         updateInfo()
     }
 
@@ -275,6 +298,7 @@ class MatchaEditor: ObservableObject {
             fname = String(cString: f)
             matcha_editor_free_string(UnsafeMutablePointer(mutating: f))
         }
+        let error = getLastError()
         DispatchQueue.main.async { [weak self] in
             self?.info = EditorInfo(
                 cursorLine: cInfo.cursor_line,
@@ -283,6 +307,9 @@ class MatchaEditor: ObservableObject {
                 modified: cInfo.modified,
                 filename: fname
             )
+            if let error = error {
+                self?.lastError = error
+            }
         }
     }
 }

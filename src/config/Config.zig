@@ -11,6 +11,7 @@ pub const Config = struct {
     tab_size: u32 = 4,
     insert_spaces: bool = true,
     line_numbers: bool = true,
+    wrap_lines: bool = true,
 
     // Theme colors (RGBA) – cyberdream
     bg_color: u32 = 0x16181AFF, // bg

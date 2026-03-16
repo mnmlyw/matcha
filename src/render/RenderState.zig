@@ -5,6 +5,7 @@ const Lexer = @import("../highlight/Lexer.zig");
 const TokenType = @import("../highlight/TokenType.zig").TokenType;
 const Theme = @import("../highlight/TokenType.zig").Theme;
 const Language = @import("../highlight/Language.zig").Language;
+const PieceTable = @import("../buffer/PieceTable.zig").PieceTable;
 
 const CellList = std.ArrayListUnmanaged(Cell.RenderCell);
 const CursorList = std.ArrayListUnmanaged(Cell.RenderCursor);
@@ -91,19 +92,16 @@ pub const RenderState = struct {
         self.bracket_highlights.clearRetainingCapacity();
 
         const cell_w = editor.cell_width;
-        const cell_h = editor.cell_height;
+        const cell_h = if (editor.cell_height > 0) editor.cell_height else 16.0;
         const vp_w: f32 = @floatFromInt(editor.viewport_width);
         const vp_h: f32 = @floatFromInt(editor.viewport_height);
         const gutter_w = editor.gutterWidth();
 
-        // Determine visible line range
-        const first_line: u32 = @intFromFloat(@max(0, editor.scroll_y / cell_h));
-        const visible_lines: u32 = @intFromFloat(vp_h / cell_h);
-        const last_line = @min(first_line + visible_lines + 2, editor.buffer.lineCount());
-
         const config = editor.config;
         const lang = editor.language;
         const highlight = lang != .none;
+        const wrap_enabled = config.wrap_lines;
+        const wrap_col: u32 = if (wrap_enabled) editor.wrapCol() else std.math.maxInt(u32);
 
         // Track max line length for horizontal scroll clamping
         var max_line_len: u32 = 0;
@@ -122,14 +120,32 @@ pub const RenderState = struct {
             sel_end_col = r.end_col;
         }
 
+        // Find first visible buffer line
+        const first_vrow: u32 = @intFromFloat(@max(0, editor.scroll_y / cell_h));
+        const visible_vrows: u32 = @as(u32, @intFromFloat(vp_h / cell_h)) + 2;
+
+        var scan_vrow: u32 = 0;
+        var first_line: u32 = 0;
+        const line_count = editor.buffer.lineCount();
+
+        if (wrap_enabled) {
+            while (first_line < line_count) {
+                const vrows = editor.lineVisualRows(first_line);
+                if (scan_vrow + vrows > first_vrow) break;
+                scan_vrow += vrows;
+                first_line += 1;
+            }
+        } else {
+            first_line = @min(first_vrow, line_count -| 1);
+            scan_vrow = first_line;
+        }
+
         // Compute multi-line state up to first visible line (using cache)
         var line_state = Lexer.LineState{};
         if (highlight and first_line > 0) {
-            // Rebuild cache if dirty
             if (self.line_state_cache.dirty) {
                 self.rebuildLineStateCache(editor, lang);
             }
-            // Start from nearest cached checkpoint
             const nearest = self.line_state_cache.getNearest(first_line);
             line_state = nearest.state;
             var scan_line = nearest.from_line;
@@ -142,26 +158,31 @@ pub const RenderState = struct {
             }
         }
 
+        // Cursor visual row (precompute)
+        var cursor_base_vrow: u32 = undefined;
+        if (wrap_enabled) {
+            cursor_base_vrow = editor.lineToVisualRow(editor.cursor.line);
+        } else {
+            cursor_base_vrow = editor.cursor.line;
+        }
+        const cursor_vcol = editor.byteColToVisualCol(editor.cursor.line, editor.cursor.col);
+        const cursor_seg: u32 = if (wrap_enabled and wrap_col > 0) cursor_vcol / wrap_col else 0;
+        const cursor_seg_col: u32 = if (wrap_enabled and wrap_col > 0) cursor_vcol % wrap_col else cursor_vcol;
+        const cursor_vrow_abs = cursor_base_vrow + cursor_seg;
+
         // Generate cells for each visible line
+        var current_vrow = scan_vrow;
         var line: u32 = first_line;
-        while (line < last_line) : (line += 1) {
-            const y = @as(f32, @floatFromInt(line)) * cell_h - editor.scroll_y;
-
-            // Line number gutter
-            if (config.line_numbers) {
-                self.line_numbers.append(self.allocator, .{
-                    .x = 0,
-                    .y = y,
-                    .w = gutter_w,
-                    .h = cell_h,
-                    .color = config.gutter_bg_color,
-                }) catch {};
-            }
-
+        while (line < line_count and current_vrow < first_vrow + visible_vrows) : (line += 1) {
             // Get line content
             const line_start = editor.buffer.lineStart(line);
             const line_end = editor.buffer.lineEnd(line);
-            const line_len = line_end - line_start;
+            var content_len = line_end - line_start;
+            if (content_len > 0) {
+                if (editor.buffer.byteAt(line_start + content_len - 1)) |b| {
+                    if (b == '\n') content_len -= 1;
+                }
+            }
 
             // Tokenize line for highlighting
             var tokens: ?[]Lexer.Token = null;
@@ -181,61 +202,96 @@ pub const RenderState = struct {
             var token_idx: u32 = 0;
             var rendered_chars: u32 = 0;
 
-            var col: u32 = 0;
-            while (col < line_len) : (col += 1) {
+            // Iterate characters with UTF-8 and wrapping
+            var col: u32 = 0; // byte offset within line
+            var vcol: u32 = 0; // visual column (codepoint count)
+
+            // Render line number on first visual row
+            const line_base_vrow = current_vrow;
+            if (config.line_numbers) {
+                const y0 = @as(f32, @floatFromInt(line_base_vrow)) * cell_h - editor.scroll_y;
+                if (y0 + cell_h >= 0 and y0 <= vp_h) {
+                    self.line_numbers.append(self.allocator, .{
+                        .x = 0,
+                        .y = y0,
+                        .w = gutter_w,
+                        .h = cell_h,
+                        .color = config.gutter_bg_color,
+                    }) catch {};
+                }
+            }
+
+            while (col < content_len) {
                 const byte = editor.buffer.byteAt(line_start + col) orelse break;
                 if (byte == '\n') break;
 
-                const x = @as(f32, @floatFromInt(col)) * cell_w - editor.scroll_x + gutter_w;
+                const cp_len = PieceTable.codepointByteLen(byte);
+                const codepoint = editor.buffer.codepointAt(line_start + col);
 
-                // Skip offscreen cells
-                if (x + cell_w < 0 or x > vp_w) continue;
+                // Compute visual position
+                const seg: u32 = if (wrap_enabled) vcol / wrap_col else 0;
+                const seg_col: u32 = if (wrap_enabled) vcol % wrap_col else vcol;
+                const vrow = line_base_vrow + seg;
 
-                var bg_color = config.bg_color;
+                const y = @as(f32, @floatFromInt(vrow)) * cell_h - editor.scroll_y;
+                const x = if (wrap_enabled)
+                    @as(f32, @floatFromInt(seg_col)) * cell_w + gutter_w
+                else
+                    @as(f32, @floatFromInt(seg_col)) * cell_w - editor.scroll_x + gutter_w;
 
-                // Selection highlight
-                if (sel_active) {
-                    if (isInSelection(line, col, sel_start_line, sel_start_col, sel_end_line, sel_end_col)) {
-                        bg_color = config.selection_color;
-                    }
-                }
+                if (y + cell_h >= 0 and y <= vp_h and x + cell_w >= 0 and x <= vp_w) {
+                    var bg_color = config.bg_color;
 
-                // Determine foreground color from syntax tokens
-                var fg_color = config.fg_color;
-                if (tokens) |toks| {
-                    // Advance token index to cover current column
-                    while (token_idx < toks.len and
-                        toks[token_idx].start + toks[token_idx].len <= col)
-                    {
-                        token_idx += 1;
-                    }
-                    if (token_idx < toks.len) {
-                        const tok = toks[token_idx];
-                        if (col >= tok.start and col < tok.start + tok.len) {
-                            fg_color = config.theme.colorFor(tok.type);
+                    // Selection highlight
+                    if (sel_active) {
+                        if (isInSelection(line, col, sel_start_line, sel_start_col, sel_end_line, sel_end_col)) {
+                            bg_color = config.selection_color;
                         }
                     }
+
+                    // Determine foreground color from syntax tokens
+                    var fg_color = config.fg_color;
+                    if (tokens) |toks| {
+                        while (token_idx < toks.len and
+                            toks[token_idx].start + toks[token_idx].len <= col)
+                        {
+                            token_idx += 1;
+                        }
+                        if (token_idx < toks.len) {
+                            const tok = toks[token_idx];
+                            if (col >= tok.start and col < tok.start + tok.len) {
+                                fg_color = config.theme.colorFor(tok.type);
+                            }
+                        }
+                    }
+
+                    self.cells.append(self.allocator, .{
+                        .x = x,
+                        .y = y,
+                        .w = cell_w,
+                        .h = cell_h,
+                        .fg = fg_color,
+                        .bg = bg_color,
+                        .glyph_index = codepoint,
+                        .style = 0,
+                    }) catch {};
+                    rendered_chars += 1;
                 }
 
-                self.cells.append(self.allocator, .{
-                    .x = x,
-                    .y = y,
-                    .w = cell_w,
-                    .h = cell_h,
-                    .fg = fg_color,
-                    .bg = bg_color,
-                    .glyph_index = @as(u32, byte),
-                    .style = 0,
-                }) catch {};
-                rendered_chars += 1;
+                col += cp_len;
+                vcol += 1;
             }
 
             // Track longest visible line for scroll clamping
             if (rendered_chars > max_line_len) max_line_len = rendered_chars;
 
+            // Visual rows this line occupies
+            const line_vrows: u32 = if (wrap_enabled) @max(1, if (vcol == 0) @as(u32, 1) else (vcol + wrap_col - 1) / wrap_col) else 1;
+
             // If line has no visible chars but is selected, add a selection rect
             if (sel_active and rendered_chars == 0) {
                 if (line >= sel_start_line and line <= sel_end_line) {
+                    const y = @as(f32, @floatFromInt(line_base_vrow)) * cell_h - editor.scroll_y;
                     self.selections.append(self.allocator, .{
                         .x = gutter_w,
                         .y = y,
@@ -245,14 +301,34 @@ pub const RenderState = struct {
                     }) catch {};
                 }
             }
+
+            // Render line number background for continuation rows (wrapped)
+            if (wrap_enabled and config.line_numbers and line_vrows > 1) {
+                var seg: u32 = 1;
+                while (seg < line_vrows) : (seg += 1) {
+                    const y = @as(f32, @floatFromInt(line_base_vrow + seg)) * cell_h - editor.scroll_y;
+                    if (y + cell_h >= 0 and y <= vp_h) {
+                        self.line_numbers.append(self.allocator, .{
+                            .x = 0,
+                            .y = y,
+                            .w = gutter_w,
+                            .h = cell_h,
+                            .color = config.gutter_bg_color,
+                        }) catch {};
+                    }
+                }
+            }
+
+            current_vrow += line_vrows;
         }
 
         // Store max visible line length for horizontal scroll clamping
         editor.max_visible_line_len = max_line_len;
 
         // Cursor
-        const cursor_x = @as(f32, @floatFromInt(editor.cursor.col)) * cell_w - editor.scroll_x + gutter_w;
-        const cursor_y = @as(f32, @floatFromInt(editor.cursor.line)) * cell_h - editor.scroll_y;
+        const cursor_x = @as(f32, @floatFromInt(cursor_seg_col)) * cell_w + gutter_w -
+            if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
+        const cursor_y = @as(f32, @floatFromInt(cursor_vrow_abs)) * cell_h - editor.scroll_y;
 
         self.cursors.append(self.allocator, .{
             .x = cursor_x,
@@ -276,8 +352,13 @@ pub const RenderState = struct {
         if (self.cached_bracket_match) |match| {
             const bracket_color: u32 = 0x585B7080; // subtle highlight
             // Highlight the matching bracket
-            const mx = @as(f32, @floatFromInt(match.col)) * cell_w - editor.scroll_x + gutter_w;
-            const my = @as(f32, @floatFromInt(match.line)) * cell_h - editor.scroll_y;
+            const m_vcol = editor.byteColToVisualCol(match.line, match.col);
+            const m_base_vrow = if (wrap_enabled) editor.lineToVisualRow(match.line) else match.line;
+            const m_seg: u32 = if (wrap_enabled and wrap_col > 0) m_vcol / wrap_col else 0;
+            const m_seg_col: u32 = if (wrap_enabled and wrap_col > 0) m_vcol % wrap_col else m_vcol;
+            const mx = @as(f32, @floatFromInt(m_seg_col)) * cell_w + gutter_w -
+                if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
+            const my = @as(f32, @floatFromInt(m_base_vrow + m_seg)) * cell_h - editor.scroll_y;
             self.bracket_highlights.append(self.allocator, .{
                 .x = mx,
                 .y = my,

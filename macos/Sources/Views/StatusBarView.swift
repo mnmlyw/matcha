@@ -16,6 +16,12 @@ struct StatusBarView: View {
                     .foregroundColor(Color(hex: 0xFF6E5EFF)) // red
             }
 
+            if let error = editor.lastError {
+                Text(error)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(Color(hex: 0xFF6E5EFF))
+            }
+
             Spacer()
 
             // Line:Col

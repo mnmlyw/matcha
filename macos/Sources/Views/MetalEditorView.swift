@@ -192,7 +192,9 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         case 51: editor.deleteBackward(); return
         case 117: editor.deleteForward(); return
         case 36: editor.newline(); return
-        case 48: editor.insert(text: "    "); return
+        case 48:
+            if hasShift { editor.dedent() } else { editor.insertTab() }
+            return
         case 116: editor.movePageUp(); return
         case 121: editor.movePageDown(); return
         case 115: editor.moveStart(); return

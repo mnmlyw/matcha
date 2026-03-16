@@ -120,27 +120,51 @@ export fn matcha_editor_save_as(ed: ?*Editor, path: ?[*:0]const u8) bool {
     return true;
 }
 
+// ── Error feedback ─────────────────────────────────────────────
+
+export fn matcha_editor_get_last_error(ed: ?*Editor) ?[*]const u8 {
+    const e = ed orelse return null;
+    if (!e.has_error) return null;
+    return &e.error_msg;
+}
+
+export fn matcha_editor_clear_error(ed: ?*Editor) void {
+    if (ed) |e| e.clearLastError();
+}
+
 // ── Editing ────────────────────────────────────────────────────
 
 export fn matcha_editor_insert(ed: ?*Editor, text: ?[*]const u8, len: u32) void {
     const e = ed orelse return;
     const t = text orelse return;
-    e.insertText(t[0..len]) catch {};
+    e.insertText(t[0..len]) catch |err| { e.setLastError(err); };
 }
 
 export fn matcha_editor_delete_backward(ed: ?*Editor) void {
     const e = ed orelse return;
-    e.deleteBackward() catch {};
+    e.deleteBackward() catch |err| { e.setLastError(err); };
 }
 
 export fn matcha_editor_delete_forward(ed: ?*Editor) void {
     const e = ed orelse return;
-    e.deleteForward() catch {};
+    e.deleteForward() catch |err| { e.setLastError(err); };
 }
 
 export fn matcha_editor_newline(ed: ?*Editor) void {
     const e = ed orelse return;
-    e.newline() catch {};
+    e.newline() catch |err| { e.setLastError(err); };
+}
+
+// ── Tab / Indent ───────────────────────────────────────────────
+
+export fn matcha_editor_insert_tab(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.insertTab() catch |err| { e.setLastError(err); };
+}
+
+export fn matcha_editor_dedent(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.dedent() catch |err| { e.setLastError(err); };
 }
 
 // ── Movement ───────────────────────────────────────────────────
@@ -246,7 +270,7 @@ export fn matcha_editor_get_selection_text(ed: ?*Editor) ?[*:0]u8 {
 export fn matcha_editor_paste(ed: ?*Editor, text: ?[*]const u8, len: u32) void {
     const e = ed orelse return;
     const t = text orelse return;
-    e.paste(t[0..len]) catch {};
+    e.paste(t[0..len]) catch |err| { e.setLastError(err); };
 }
 
 export fn matcha_editor_free_string(str: ?[*:0]u8) void {
@@ -259,11 +283,11 @@ export fn matcha_editor_free_string(str: ?[*:0]u8) void {
 // ── Undo/Redo ──────────────────────────────────────────────────
 
 export fn matcha_editor_undo(ed: ?*Editor) void {
-    if (ed) |e| e.undo() catch {};
+    if (ed) |e| e.undo() catch |err| { e.setLastError(err); };
 }
 
 export fn matcha_editor_redo(ed: ?*Editor) void {
-    if (ed) |e| e.redo() catch {};
+    if (ed) |e| e.redo() catch |err| { e.setLastError(err); };
 }
 
 // ── Input ──────────────────────────────────────────────────────

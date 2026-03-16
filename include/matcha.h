@@ -79,11 +79,19 @@ bool matcha_editor_open_file(matcha_editor_t ed, const char* path);
 bool matcha_editor_save(matcha_editor_t ed);
 bool matcha_editor_save_as(matcha_editor_t ed, const char* path);
 
+// Error feedback
+const char* matcha_editor_get_last_error(matcha_editor_t ed);
+void matcha_editor_clear_error(matcha_editor_t ed);
+
 // Editing
 void matcha_editor_insert(matcha_editor_t ed, const char* text, uint32_t len);
 void matcha_editor_delete_backward(matcha_editor_t ed);
 void matcha_editor_delete_forward(matcha_editor_t ed);
 void matcha_editor_newline(matcha_editor_t ed);
+
+// Tab / Indent
+void matcha_editor_insert_tab(matcha_editor_t ed);
+void matcha_editor_dedent(matcha_editor_t ed);
 
 // Movement
 void matcha_editor_move_left(matcha_editor_t ed);
