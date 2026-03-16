@@ -69,6 +69,7 @@ class MetalEditorView: MTKView, MTKViewDelegate {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+        editor.markActive()
         updateViewport()
     }
 
@@ -140,6 +141,7 @@ class MetalEditorView: MTKView, MTKViewDelegate {
     // MARK: - Keyboard Input
 
     override func keyDown(with event: NSEvent) {
+        editor.markActive()
         resetCursorBlink()
         let modifiers = event.modifierFlags
 
@@ -157,13 +159,13 @@ class MetalEditorView: MTKView, MTKViewDelegate {
             case "x": cutSelection(); return
             case "v": pasteFromClipboard(); return
             case "f":
-                NotificationCenter.default.post(name: .matchaToggleFind, object: nil)
+                NotificationCenter.default.post(name: .matchaToggleFind, object: editor)
                 return
             case "g":
                 if hasShift {
-                    NotificationCenter.default.post(name: .matchaFindPrev, object: nil)
+                    NotificationCenter.default.post(name: .matchaFindPrev, object: editor)
                 } else {
-                    NotificationCenter.default.post(name: .matchaFindNext, object: nil)
+                    NotificationCenter.default.post(name: .matchaFindNext, object: editor)
                 }
                 return
             default: break
@@ -213,6 +215,7 @@ class MetalEditorView: MTKView, MTKViewDelegate {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        editor.markActive()
         let loc = convert(event.locationInWindow, from: nil)
         let x = Float(loc.x)
         let y = Float(bounds.height - loc.y)
@@ -242,14 +245,16 @@ class MetalEditorView: MTKView, MTKViewDelegate {
 
     // MARK: - Clipboard
 
-    private func copySelection() {
-        guard let text = editor.getSelectionText() else { return }
+    @discardableResult
+    private func copySelection() -> Bool {
+        guard let text = editor.getSelectionText() else { return false }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        return true
     }
 
     private func cutSelection() {
-        copySelection()
+        guard copySelection() else { return }
         editor.deleteBackward()
     }
 

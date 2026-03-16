@@ -103,20 +103,29 @@ export fn matcha_editor_new_file(ed: ?*Editor) void {
 export fn matcha_editor_open_file(ed: ?*Editor, path: ?[*:0]const u8) bool {
     const e = ed orelse return false;
     const p = path orelse return false;
-    e.openFile(std.mem.span(p)) catch return false;
+    e.openFile(std.mem.span(p)) catch |err| {
+        e.setLastError(err);
+        return false;
+    };
     return true;
 }
 
 export fn matcha_editor_save(ed: ?*Editor) bool {
     const e = ed orelse return false;
-    e.save() catch return false;
+    e.save() catch |err| {
+        e.setLastError(err);
+        return false;
+    };
     return true;
 }
 
 export fn matcha_editor_save_as(ed: ?*Editor, path: ?[*:0]const u8) bool {
     const e = ed orelse return false;
     const p = path orelse return false;
-    e.saveAs(std.mem.span(p)) catch return false;
+    e.saveAs(std.mem.span(p)) catch |err| {
+        e.setLastError(err);
+        return false;
+    };
     return true;
 }
 
@@ -137,34 +146,46 @@ export fn matcha_editor_clear_error(ed: ?*Editor) void {
 export fn matcha_editor_insert(ed: ?*Editor, text: ?[*]const u8, len: u32) void {
     const e = ed orelse return;
     const t = text orelse return;
-    e.insertText(t[0..len]) catch |err| { e.setLastError(err); };
+    e.insertText(t[0..len]) catch |err| {
+        e.setLastError(err);
+    };
 }
 
 export fn matcha_editor_delete_backward(ed: ?*Editor) void {
     const e = ed orelse return;
-    e.deleteBackward() catch |err| { e.setLastError(err); };
+    e.deleteBackward() catch |err| {
+        e.setLastError(err);
+    };
 }
 
 export fn matcha_editor_delete_forward(ed: ?*Editor) void {
     const e = ed orelse return;
-    e.deleteForward() catch |err| { e.setLastError(err); };
+    e.deleteForward() catch |err| {
+        e.setLastError(err);
+    };
 }
 
 export fn matcha_editor_newline(ed: ?*Editor) void {
     const e = ed orelse return;
-    e.newline() catch |err| { e.setLastError(err); };
+    e.newline() catch |err| {
+        e.setLastError(err);
+    };
 }
 
 // ── Tab / Indent ───────────────────────────────────────────────
 
 export fn matcha_editor_insert_tab(ed: ?*Editor) void {
     const e = ed orelse return;
-    e.insertTab() catch |err| { e.setLastError(err); };
+    e.insertTab() catch |err| {
+        e.setLastError(err);
+    };
 }
 
 export fn matcha_editor_dedent(ed: ?*Editor) void {
     const e = ed orelse return;
-    e.dedent() catch |err| { e.setLastError(err); };
+    e.dedent() catch |err| {
+        e.setLastError(err);
+    };
 }
 
 // ── Movement ───────────────────────────────────────────────────
@@ -270,7 +291,9 @@ export fn matcha_editor_get_selection_text(ed: ?*Editor) ?[*:0]u8 {
 export fn matcha_editor_paste(ed: ?*Editor, text: ?[*]const u8, len: u32) void {
     const e = ed orelse return;
     const t = text orelse return;
-    e.paste(t[0..len]) catch |err| { e.setLastError(err); };
+    e.paste(t[0..len]) catch |err| {
+        e.setLastError(err);
+    };
 }
 
 export fn matcha_editor_free_string(str: ?[*:0]u8) void {
@@ -283,11 +306,15 @@ export fn matcha_editor_free_string(str: ?[*:0]u8) void {
 // ── Undo/Redo ──────────────────────────────────────────────────
 
 export fn matcha_editor_undo(ed: ?*Editor) void {
-    if (ed) |e| e.undo() catch |err| { e.setLastError(err); };
+    if (ed) |e| e.undo() catch |err| {
+        e.setLastError(err);
+    };
 }
 
 export fn matcha_editor_redo(ed: ?*Editor) void {
-    if (ed) |e| e.redo() catch |err| { e.setLastError(err); };
+    if (ed) |e| e.redo() catch |err| {
+        e.setLastError(err);
+    };
 }
 
 // ── Input ──────────────────────────────────────────────────────
@@ -324,14 +351,20 @@ export fn matcha_editor_replace_next(ed: ?*Editor, query: ?[*]const u8, q_len: u
     const e = ed orelse return false;
     const q = query orelse return false;
     const r = replacement orelse return false;
-    return e.replaceNext(q[0..q_len], r[0..r_len]) catch false;
+    return e.replaceNext(q[0..q_len], r[0..r_len]) catch |err| {
+        e.setLastError(err);
+        return false;
+    };
 }
 
 export fn matcha_editor_replace_all(ed: ?*Editor, query: ?[*]const u8, q_len: u32, replacement: ?[*]const u8, r_len: u32) u32 {
     const e = ed orelse return 0;
     const q = query orelse return 0;
     const r = replacement orelse return 0;
-    return e.replaceAll(q[0..q_len], r[0..r_len]) catch 0;
+    return e.replaceAll(q[0..q_len], r[0..r_len]) catch |err| {
+        e.setLastError(err);
+        return 0;
+    };
 }
 
 // ── Bracket highlights ────────────────────────────────────────

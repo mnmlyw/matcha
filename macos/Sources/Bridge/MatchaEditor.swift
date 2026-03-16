@@ -3,6 +3,12 @@ import MatchaKit
 
 /// Swift wrapper around the Zig editor core (matcha_editor_t).
 class MatchaEditor: ObservableObject {
+    private final class WeakEditorRef {
+        weak var value: MatchaEditor?
+    }
+
+    private static let activeEditorRef = WeakEditorRef()
+
     private(set) var handle: matcha_editor_t?
     private let config: MatchaConfig
 
@@ -36,6 +42,14 @@ class MatchaEditor: ObservableObject {
         let str = String(cString: cStr)
         matcha_editor_clear_error(h)
         return str
+    }
+
+    static var activeEditor: MatchaEditor? {
+        activeEditorRef.value
+    }
+
+    func markActive() {
+        MatchaEditor.activeEditorRef.value = self
     }
 
     // MARK: - File I/O
@@ -307,9 +321,7 @@ class MatchaEditor: ObservableObject {
                 modified: cInfo.modified,
                 filename: fname
             )
-            if let error = error {
-                self?.lastError = error
-            }
+            self?.lastError = error
         }
     }
 }

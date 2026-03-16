@@ -14,7 +14,8 @@ struct MatchaApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New") {
                     if NSApp.windows.contains(where: { $0.isVisible }) {
-                        NotificationCenter.default.post(name: .matchaNewFile, object: nil)
+                        guard let editor = MatchaEditor.activeEditor else { return }
+                        NotificationCenter.default.post(name: .matchaNewFile, object: editor)
                     } else {
                         // No window open — create one via SwiftUI's built-in action
                         NSApp.sendAction(#selector(AppDelegate.newWindowAction), to: nil, from: nil)
@@ -26,7 +27,8 @@ struct MatchaApp: App {
                     if !NSApp.windows.contains(where: { $0.isVisible }) {
                         NSApp.sendAction(#selector(AppDelegate.openFileAction), to: nil, from: nil)
                     } else {
-                        NotificationCenter.default.post(name: .matchaOpenFile, object: nil)
+                        guard let editor = MatchaEditor.activeEditor else { return }
+                        NotificationCenter.default.post(name: .matchaOpenFile, object: editor)
                     }
                 }
                 .keyboardShortcut("o", modifiers: .command)
@@ -34,12 +36,14 @@ struct MatchaApp: App {
                 Divider()
 
                 Button("Save") {
-                    NotificationCenter.default.post(name: .matchaSaveFile, object: nil)
+                    guard let editor = MatchaEditor.activeEditor else { return }
+                    NotificationCenter.default.post(name: .matchaSaveFile, object: editor)
                 }
                 .keyboardShortcut("s", modifiers: .command)
 
                 Button("Save As...") {
-                    NotificationCenter.default.post(name: .matchaSaveAsFile, object: nil)
+                    guard let editor = MatchaEditor.activeEditor else { return }
+                    NotificationCenter.default.post(name: .matchaSaveAsFile, object: editor)
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
             }
@@ -70,7 +74,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Open a new window first, then trigger file open after a brief delay
         newWindowAction()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            NotificationCenter.default.post(name: .matchaOpenFile, object: nil)
+            guard let editor = MatchaEditor.activeEditor else { return }
+            NotificationCenter.default.post(name: .matchaOpenFile, object: editor)
         }
     }
 }

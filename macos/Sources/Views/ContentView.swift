@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
+    private static var didHandleLaunchFile = false
+
     @StateObject private var editorState = EditorState()
     @State private var showFindBar = false
     @State private var showReplace = false
@@ -19,29 +21,32 @@ struct ContentView: View {
             StatusBarView(editor: editorState.editor)
         }
         .background(Color(hex: 0x16181AFF))
-        .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile, object: editorState.editor)) { _ in
             editorState.editor.newFile()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile, object: editorState.editor)) { _ in
             openFile()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveFile)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveFile, object: editorState.editor)) { _ in
             saveFile()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile, object: editorState.editor)) { _ in
             saveAsFile()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind, object: editorState.editor)) { _ in
             showFindBar.toggle()
             if !showFindBar { showReplace = false }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext, object: editorState.editor)) { _ in
             // Handled via FindBarView binding
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev, object: editorState.editor)) { _ in
             // Handled via FindBarView binding
         }
         .onAppear {
+            editorState.editor.markActive()
+            guard !Self.didHandleLaunchFile else { return }
+            Self.didHandleLaunchFile = true
             // Check command-line arguments for a file path
             for arg in ProcessInfo.processInfo.arguments.dropFirst() {
                 let path = arg.hasPrefix("/") ? arg

@@ -81,6 +81,14 @@ pub const UndoStack = struct {
         }
     }
 
+    /// Drop the current in-progress edit group.
+    pub fn discardCurrentGroup(self: *UndoStack) void {
+        for (self.current_ops.items) |op| {
+            self.allocator.free(op.text);
+        }
+        self.current_ops.clearRetainingCapacity();
+    }
+
     /// Commit the current group of operations to the undo stack.
     pub fn commit(self: *UndoStack) !void {
         if (self.current_ops.items.len == 0) return;

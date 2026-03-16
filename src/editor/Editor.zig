@@ -97,6 +97,7 @@ pub const Editor = struct {
         self.scroll_x = 0;
         self.scroll_y = 0;
         self.language = .none;
+        self.max_visible_line_len = 0;
         self.edit_counter +%= 1;
         self.has_error = false;
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
@@ -113,18 +114,31 @@ pub const Editor = struct {
         const content = try file.readToEndAlloc(self.allocator, 100 * 1024 * 1024); // 100MB max
         defer self.allocator.free(content);
 
+        var new_buffer = try PieceTable.initWithContent(self.allocator, content);
+        errdefer new_buffer.deinit();
+        const new_filename = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(new_filename);
+
+        const old_filename = if (self.filename_owned) self.filename else null;
+
         self.buffer.deinit();
-        self.buffer = try PieceTable.initWithContent(self.allocator, content);
+        self.buffer = new_buffer;
         self.cursor = .{};
         self.selection = .{};
+        self.undo_stack.deinit();
+        self.undo_stack = UndoStack.init(self.allocator);
         self.modified = false;
-
-        if (self.filename_owned) {
-            if (self.filename) |f| self.allocator.free(f);
-        }
-        self.filename = try self.allocator.dupe(u8, path);
-        self.filename_owned = true;
+        self.scroll_x = 0;
+        self.scroll_y = 0;
+        self.max_visible_line_len = 0;
         self.language = Language.detectFromFilename(path);
+        self.edit_counter +%= 1;
+        self.has_error = false;
+        self.wrap_cache_edit_counter = 0xFFFFFFFF;
+        self.filename = new_filename;
+        self.filename_owned = true;
+
+        if (old_filename) |f| self.allocator.free(f);
     }
 
     pub fn save(self: *Editor) !void {
@@ -305,23 +319,37 @@ pub const Editor = struct {
         if (self.selection.active) {
             const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
             var spaces: [16]u8 = [_]u8{' '} ** 16;
-            const n: u32 = @min(self.config.tab_size, 16);
+            const space_count: u32 = @min(self.config.tab_size, 16);
+            const indent_text = if (self.config.insert_spaces) spaces[0..space_count] else "\t";
+            const indent_width: u32 = @intCast(indent_text.len);
+            var applied_lines: u32 = 0;
 
             self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+            errdefer {
+                while (applied_lines > 0) {
+                    applied_lines -= 1;
+                    const line_num = range.start_line + applied_lines;
+                    const ls = self.buffer.lineStart(line_num);
+                    self.buffer.delete(ls, indent_width) catch {};
+                }
+                self.undo_stack.discardCurrentGroup();
+            }
 
             var line = range.start_line;
             while (line <= range.end_line) : (line += 1) {
                 const ls = self.buffer.lineStart(line);
-                self.undo_stack.record(.insert, ls, spaces[0..n]) catch break;
-                self.buffer.insert(ls, spaces[0..n]) catch break;
+                try self.undo_stack.record(.insert, ls, indent_text);
+                try self.buffer.insert(ls, indent_text);
+                applied_lines += 1;
             }
 
-            self.undo_stack.commit() catch {};
+            try self.undo_stack.commit();
             self.modified = true;
             self.edit_counter +%= 1;
-            self.cursor.col += n;
+            self.cursor.col += indent_width;
             self.cursor.target_col = self.cursor.col;
-            self.selection.anchor_col += n;
+            self.selection.anchor_col += indent_width;
+            self.ensureCursorVisible();
         } else {
             var spaces: [16]u8 = [_]u8{' '} ** 16;
             const n = @min(self.config.tab_size, 16);
@@ -334,6 +362,11 @@ pub const Editor = struct {
     }
 
     pub fn dedent(self: *Editor) !void {
+        const DedentChange = struct {
+            line: u32,
+            removed: []u8,
+        };
+
         var start_line = self.cursor.line;
         var end_line = self.cursor.line;
         if (self.selection.active) {
@@ -343,8 +376,10 @@ pub const Editor = struct {
         }
 
         const tab = self.config.tab_size;
-        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
-        var did_change = false;
+        const max_changes = end_line - start_line + 1;
+        const changes = try self.allocator.alloc(DedentChange, max_changes);
+        defer self.allocator.free(changes);
+        var change_count: usize = 0;
 
         var line = start_line;
         while (line <= end_line) : (line += 1) {
@@ -361,23 +396,48 @@ pub const Editor = struct {
                 } else break;
             }
             if (remove > 0) {
-                const deleted = self.buffer.getRange(self.allocator, ls, ls + remove) catch break;
-                defer self.allocator.free(deleted);
-                self.undo_stack.record(.delete, ls, deleted) catch break;
-                self.buffer.delete(ls, remove) catch break;
-                did_change = true;
-
-                if (self.cursor.line == line) {
-                    self.cursor.col -|= remove;
-                }
-                if (self.selection.active and self.selection.anchor_line == line) {
-                    self.selection.anchor_col -|= remove;
-                }
+                changes[change_count] = .{
+                    .line = line,
+                    .removed = try self.buffer.getRange(self.allocator, ls, ls + remove),
+                };
+                change_count += 1;
+            }
+        }
+        defer {
+            for (changes[0..change_count]) |change| {
+                self.allocator.free(change.removed);
             }
         }
 
-        if (did_change) {
-            self.undo_stack.commit() catch {};
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        var applied_changes: usize = 0;
+        errdefer {
+            while (applied_changes > 0) {
+                applied_changes -= 1;
+                const change = changes[applied_changes];
+                const ls = self.buffer.lineStart(change.line);
+                self.buffer.insert(ls, change.removed) catch {};
+            }
+            self.undo_stack.discardCurrentGroup();
+        }
+
+        for (changes[0..change_count]) |change| {
+            const remove: u32 = @intCast(change.removed.len);
+            const ls = self.buffer.lineStart(change.line);
+            try self.undo_stack.record(.delete, ls, change.removed);
+            try self.buffer.delete(ls, remove);
+            applied_changes += 1;
+
+            if (self.cursor.line == change.line) {
+                self.cursor.col -|= remove;
+            }
+            if (self.selection.active and self.selection.anchor_line == change.line) {
+                self.selection.anchor_col -|= remove;
+            }
+        }
+
+        if (change_count > 0) {
+            try self.undo_stack.commit();
             self.modified = true;
             self.edit_counter +%= 1;
         }
@@ -932,16 +992,23 @@ pub const Editor = struct {
         if (query.len == 0) return 0;
         var count: u32 = 0;
 
-        // Move to start
         self.cursor.moveTo(0, 0);
         self.selection.clear();
 
-        while (self.findNext(query)) {
-            try self.deleteSelection();
-            try self.insertText(replacement);
-            count += 1;
-            // Safety: prevent infinite loop if replacement contains query
-            if (count > 100_000) break;
+        var search_pos: u32 = 0;
+        while (search_pos + @as(u32, @intCast(query.len)) <= self.buffer.totalLength()) {
+            if (self.matchAt(search_pos, query)) {
+                const start_lc = self.buffer.posToLineCol(search_pos);
+                const end_lc = self.buffer.posToLineCol(search_pos + @as(u32, @intCast(query.len)));
+                self.selection.setAnchor(start_lc.line, start_lc.col);
+                self.cursor.moveTo(end_lc.line, end_lc.col);
+                try self.deleteSelection();
+                try self.insertText(replacement);
+                search_pos += @as(u32, @intCast(replacement.len));
+                count += 1;
+            } else {
+                search_pos += 1;
+            }
         }
         return count;
     }
@@ -1398,4 +1465,98 @@ test "Editor: UTF-8 delete backward" {
     const content = try ed.buffer.getContent(testing.allocator);
     defer testing.allocator.free(content);
     try testing.expectEqualStrings("h", content);
+}
+
+test "Editor: openFile resets state and clears undo history" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "sample.txt",
+        .data = "loaded\ntext",
+    });
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "sample.txt");
+    defer testing.allocator.free(path);
+
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("draft");
+    ed.selectAll();
+    ed.scroll_x = 42;
+    ed.scroll_y = 24;
+
+    try ed.openFile(path);
+
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("loaded\ntext", content);
+    try testing.expectEqual(@as(u32, 0), ed.cursor.line);
+    try testing.expectEqual(@as(u32, 0), ed.cursor.col);
+    try testing.expect(!ed.selection.active);
+    try testing.expect(!ed.modified);
+    try testing.expectEqual(@as(f32, 0), ed.scroll_x);
+    try testing.expectEqual(@as(f32, 0), ed.scroll_y);
+
+    try ed.undo();
+    const after_undo = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(after_undo);
+    try testing.expectEqualStrings("loaded\ntext", after_undo);
+}
+
+test "Editor: openFile failure preserves current document" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir_path);
+    const missing_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "missing.txt" });
+    defer testing.allocator.free(missing_path);
+
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("keep");
+    try testing.expectError(error.FileNotFound, ed.openFile(missing_path));
+
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("keep", content);
+    try testing.expectEqual(@as(u32, 0), ed.cursor.line);
+    try testing.expectEqual(@as(u32, 4), ed.cursor.col);
+}
+
+test "Editor: replaceAll does not re-match inserted text" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("aba");
+    const replaced = try ed.replaceAll("a", "aa");
+    try testing.expectEqual(@as(u32, 2), replaced);
+
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("aabaa", content);
+}
+
+test "Editor: multi-line tab insert respects tab mode" {
+    var config = Config.defaults();
+    config.insert_spaces = false;
+    config.tab_size = 4;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\nb");
+    ed.selectAll();
+    try ed.insertTab();
+
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("\ta\n\tb", content);
+    try testing.expectEqual(@as(u32, 1), ed.selection.anchor_col);
+    try testing.expectEqual(@as(u32, 2), ed.cursor.col);
 }
