@@ -15,5 +15,11 @@ Add Zig `test "Module: scenario"` blocks in the same file as the code they cover
 ## Commit & Pull Request Guidelines
 Recent commits use imperative, sentence-style subjects such as `Add syntax highlighting...` and `Fix editor state...`. Keep commits scoped to one logical change and describe the visible behavior, not just the refactor. Pull requests should summarize affected areas, list verification commands, link the relevant issue, and include screenshots or a short recording for UI changes.
 
+## C API & Bridge Contract
+Adding a new editor operation requires changes in four files: implement in `src/editor/Editor.zig`, export via `src/main_c.zig`, declare in `include/matcha.h`, and wrap in `macos/Sources/Bridge/MatchaEditor.swift`. The C API uses two memory ownership patterns: **borrowed** pointers (e.g., `filename` in `matcha_editor_info_s`, `get_last_error`) that are valid until the next editor mutation and must not be freed, and **allocated** pointers (e.g., `get_selection_text`) that the caller must free with `matcha_free_string`. The editor caches a null-terminated `filename_z` field to avoid allocating on every `get_info` call.
+
+## Architecture Invariants
+Cursor columns are **byte offsets**, not codepoint counts; `byteColToVisualCol`/`visualColToByteCol` convert between the two. Line operations (`toggleComment`, `duplicateLine`, `moveLineUp`, `moveLineDown`) modify the piece table in-place and process lines in **reverse order** so that byte positions in undo records remain valid when replayed. The piece table caches `line_count` and `total_length`, invalidated by `refreshCaches` on every insert/delete. The wrap cache uses a prefix-sum array keyed by `edit_counter` and `wrap_col`; it rebuilds automatically when stale.
+
 ## Configuration Notes
 The app loads user configuration from `~/.config/matcha/config` through `src/config/Parser.zig`. When adding settings, update the parser, defaults, and any Swift bridge reads together.
