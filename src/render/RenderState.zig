@@ -4,6 +4,7 @@ const Cell = @import("Cell.zig");
 const Lexer = @import("../highlight/Lexer.zig");
 const Language = @import("../highlight/Language.zig").Language;
 const PieceTable = @import("../buffer/PieceTable.zig").PieceTable;
+const charWidth = @import("../buffer/UnicodeIterator.zig").charWidth;
 
 const CellList = std.ArrayListUnmanaged(Cell.RenderCell);
 const CursorList = std.ArrayListUnmanaged(Cell.RenderCursor);
@@ -158,7 +159,7 @@ pub const RenderState = struct {
         const lang = editor.language;
         const highlight = lang != .none;
         const wrap_enabled = config.wrap_lines;
-        const wrap_col: u32 = if (wrap_enabled) editor.wrapCol() else std.math.maxInt(u32);
+        const wrap_width = if (wrap_enabled) editor.wrapWidthPixels() else 0;
 
         if (highlight) {
             if (self.line_token_cache.cached_edit_counter != editor.edit_counter or
@@ -173,6 +174,7 @@ pub const RenderState = struct {
 
         // Track max line length for horizontal scroll clamping
         var max_line_len: u32 = 0;
+        var max_line_width: f32 = 0;
 
         // Selection range
         const sel_active = editor.selection.active;
@@ -227,25 +229,12 @@ pub const RenderState = struct {
         } else {
             cursor_base_vrow = editor.cursor.line;
         }
-        const cursor_vcol = editor.byteColToVisualCol(editor.cursor.line, editor.cursor.col);
-        const cursor_seg: u32 = if (wrap_enabled and wrap_col > 0) cursor_vcol / wrap_col else 0;
-        const cursor_seg_col: u32 = if (wrap_enabled and wrap_col > 0) cursor_vcol % wrap_col else cursor_vcol;
-        const cursor_vrow_abs = cursor_base_vrow + cursor_seg;
 
         // Generate cells for each visible line
         var current_vrow = scan_vrow;
         var line: u32 = first_line;
         while (line < line_count and current_vrow < first_vrow + visible_vrows) : (line += 1) {
-            // Get line content
-            const line_start = editor.buffer.lineStart(line);
-            const line_end = editor.buffer.lineEnd(line);
-            var content_len = line_end - line_start;
-            if (content_len > 0) {
-                if (editor.buffer.byteAt(line_start + content_len - 1)) |b| {
-                    if (b == '\n') content_len -= 1;
-                }
-            }
-
+            // Tokenize first (may populate scratch_line internally)
             var tokens: ?[]const Lexer.Token = null;
             if (highlight) {
                 const entry = self.lineTokens(editor, line, line_state, lang) catch null;
@@ -255,12 +244,20 @@ pub const RenderState = struct {
                 }
             }
 
+            // Copy line content into scratch buffer for direct iteration
+            const line_data = self.lineBytes(editor, line) catch {
+                current_vrow += 1;
+                continue;
+            };
+            const content_len: u32 = @intCast(line_data.len);
+
             var token_idx: u32 = 0;
 
             // Iterate characters with UTF-8 and wrapping
             var col: u32 = 0; // byte offset within line
-            var vcol: u32 = 0; // visual column (codepoint count)
-
+            var vcol: u32 = 0; // visual column (grid units, CJK = 2)
+            var seg_x_offset: f32 = 0; // point offset within current wrap segment
+            var last_seg: u32 = 0;
             // Render line number on first visual row
             const line_base_vrow = current_vrow;
             if (config.line_numbers) {
@@ -285,24 +282,30 @@ pub const RenderState = struct {
             }
 
             while (col < content_len) {
-                const byte = editor.buffer.byteAt(line_start + col) orelse break;
+                if (wrap_enabled and seg_x_offset >= wrap_width and seg_x_offset > 0) {
+                    last_seg += 1;
+                    seg_x_offset = 0;
+                }
+
+                const byte = line_data[col];
                 if (byte == '\n') break;
 
                 const cp_len = PieceTable.codepointByteLen(byte);
-                const codepoint = editor.buffer.codepointAt(line_start + col);
+                const codepoint = decodeCodepointFromSlice(line_data, col);
+                const cw: u32 = charWidth(codepoint);
+                const char_px_w = editor.pixelWidthForCodepoint(codepoint);
 
                 // Compute visual position
-                const seg: u32 = if (wrap_enabled) vcol / wrap_col else 0;
-                const seg_col: u32 = if (wrap_enabled) vcol % wrap_col else vcol;
+                const seg = last_seg;
                 const vrow = line_base_vrow + seg;
 
                 const y = @as(f32, @floatFromInt(vrow)) * cell_h - editor.scroll_y;
                 const x = if (wrap_enabled)
-                    @as(f32, @floatFromInt(seg_col)) * cell_w + gutter_w
+                    seg_x_offset + gutter_w
                 else
-                    @as(f32, @floatFromInt(seg_col)) * cell_w - editor.scroll_x + gutter_w;
+                    seg_x_offset - editor.scroll_x + gutter_w;
 
-                if (y + cell_h >= 0 and y <= vp_h and x + cell_w >= 0 and x <= vp_w) {
+                if (y + cell_h >= 0 and y <= vp_h and x + char_px_w >= 0 and x <= vp_w) {
                     var bg_color = config.bg_color;
 
                     // Selection highlight
@@ -331,7 +334,7 @@ pub const RenderState = struct {
                     self.cells.append(self.allocator, .{
                         .x = x,
                         .y = y,
-                        .w = cell_w,
+                        .w = char_px_w,
                         .h = cell_h,
                         .fg = fg_color,
                         .bg = bg_color,
@@ -341,14 +344,16 @@ pub const RenderState = struct {
                 }
 
                 col += cp_len;
-                vcol += 1;
+                vcol += cw;
+                seg_x_offset += char_px_w;
             }
 
             // Track the full line width, not just currently visible cells.
             if (vcol > max_line_len) max_line_len = vcol;
+            if (seg_x_offset > max_line_width) max_line_width = seg_x_offset;
 
             // Visual rows this line occupies
-            const line_vrows: u32 = if (wrap_enabled) @max(1, if (vcol == 0) @as(u32, 1) else (vcol + wrap_col - 1) / wrap_col) else 1;
+            const line_vrows: u32 = if (wrap_enabled) last_seg + 1 else 1;
 
             // If line has no visible chars but is selected, add a selection rect
             if (sel_active and vcol == 0) {
@@ -386,11 +391,13 @@ pub const RenderState = struct {
 
         // Store max visible line length for horizontal scroll clamping
         editor.max_visible_line_len = max_line_len;
+        editor.max_visible_line_width = max_line_width;
 
         // Cursor
-        const cursor_x = @as(f32, @floatFromInt(cursor_seg_col)) * cell_w + gutter_w -
+        const cursor_metrics = editor.byteColToPixelMetrics(editor.cursor.line, editor.cursor.col);
+        const cursor_x = (if (wrap_enabled) cursor_metrics.segment_x else cursor_metrics.total_x) + gutter_w -
             if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
-        const cursor_y = @as(f32, @floatFromInt(cursor_vrow_abs)) * cell_h - editor.scroll_y;
+        const cursor_y = @as(f32, @floatFromInt(cursor_base_vrow + cursor_metrics.segment)) * cell_h - editor.scroll_y;
 
         self.cursors.append(self.allocator, .{
             .x = cursor_x,
@@ -414,13 +421,11 @@ pub const RenderState = struct {
         if (self.cached_bracket_match) |match| {
             const bracket_color: u32 = 0x585B7080; // subtle highlight
             // Highlight the matching bracket
-            const m_vcol = editor.byteColToVisualCol(match.line, match.col);
+            const match_metrics = editor.byteColToPixelMetrics(match.line, match.col);
             const m_base_vrow = if (wrap_enabled) editor.lineToVisualRow(match.line) else match.line;
-            const m_seg: u32 = if (wrap_enabled and wrap_col > 0) m_vcol / wrap_col else 0;
-            const m_seg_col: u32 = if (wrap_enabled and wrap_col > 0) m_vcol % wrap_col else m_vcol;
-            const mx = @as(f32, @floatFromInt(m_seg_col)) * cell_w + gutter_w -
+            const mx = (if (wrap_enabled) match_metrics.segment_x else match_metrics.total_x) + gutter_w -
                 if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
-            const my = @as(f32, @floatFromInt(m_base_vrow + m_seg)) * cell_h - editor.scroll_y;
+            const my = @as(f32, @floatFromInt(m_base_vrow + match_metrics.segment)) * cell_h - editor.scroll_y;
             self.bracket_highlights.append(self.allocator, .{
                 .x = mx,
                 .y = my,
@@ -513,6 +518,24 @@ pub const RenderState = struct {
     }
 };
 
+fn decodeCodepointFromSlice(data: []const u8, pos: u32) u32 {
+    const p: usize = pos;
+    if (p >= data.len) return 0xFFFD;
+    const b0 = data[p];
+    if (b0 < 0x80) return b0;
+    if (b0 < 0xC0) return 0xFFFD;
+    if (b0 < 0xE0) {
+        if (p + 1 >= data.len) return 0xFFFD;
+        return (@as(u32, b0 & 0x1F) << 6) | @as(u32, data[p + 1] & 0x3F);
+    }
+    if (b0 < 0xF0) {
+        if (p + 2 >= data.len) return 0xFFFD;
+        return (@as(u32, b0 & 0x0F) << 12) | (@as(u32, data[p + 1] & 0x3F) << 6) | @as(u32, data[p + 2] & 0x3F);
+    }
+    if (p + 3 >= data.len) return 0xFFFD;
+    return (@as(u32, b0 & 0x07) << 18) | (@as(u32, data[p + 1] & 0x3F) << 12) | (@as(u32, data[p + 2] & 0x3F) << 6) | @as(u32, data[p + 3] & 0x3F);
+}
+
 const testing = std.testing;
 const Config = @import("../config/Config.zig").Config;
 const Editor = @import("../editor/Editor.zig").Editor;
@@ -556,4 +579,73 @@ test "RenderState: highlight tokens are reused across redraws without edits" {
     const second_tokens = ed.render_state.line_token_cache.entries.items[0].tokens;
     try testing.expectEqual(first_tokens.ptr, second_tokens.ptr);
     try testing.expectEqual(first_tokens.len, second_tokens.len);
+}
+
+test "RenderState: fullwidth cells stay aligned with the cursor grid" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = false;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(80, 20, 1, 1);
+    ed.setWideCellWidth(1.5);
+    try ed.insertText("a好b");
+    ed.cursor.moveTo(0, 4);
+
+    ed.prepareRender();
+
+    try testing.expectEqual(@as(usize, 3), ed.render_state.cells.items.len);
+    try testing.expectEqual(@as(f32, 0), ed.render_state.cells.items[0].x);
+    try testing.expectEqual(@as(f32, 1), ed.render_state.cells.items[1].x);
+    try testing.expectEqual(@as(f32, 1.5), ed.render_state.cells.items[1].w);
+    try testing.expectEqual(@as(f32, 2.5), ed.render_state.cells.items[2].x);
+    try testing.expectEqual(@as(f32, 2.5), ed.render_state.cursors.items[0].x);
+}
+
+test "RenderState: Hangul uses its measured width instead of Han width" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = false;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(80, 20, 1, 1);
+    ed.setWideCellWidth(1.5);
+    ed.setHangulCellWidth(1.25);
+    try ed.insertText("a한b");
+    ed.cursor.moveTo(0, 4);
+
+    ed.prepareRender();
+
+    try testing.expectEqual(@as(usize, 3), ed.render_state.cells.items.len);
+    try testing.expectEqual(@as(f32, 1.25), ed.render_state.cells.items[1].w);
+    try testing.expectEqual(@as(f32, 2.25), ed.render_state.cells.items[2].x);
+    try testing.expectEqual(@as(f32, 2.25), ed.render_state.cursors.items[0].x);
+}
+
+test "RenderState: exact-fit wrapped CJK does not create a phantom row" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(4, 10, 1, 1);
+    ed.setWideCellWidth(1.5);
+    try ed.insertText("a好好");
+    ed.cursor.moveTo(0, 7);
+
+    ed.prepareRender();
+
+    try testing.expectEqual(@as(u32, 1), ed.lineVisualRows(0));
+    try testing.expectEqual(@as(usize, 3), ed.render_state.cells.items.len);
+    try testing.expectEqual(@as(f32, 0), ed.render_state.cells.items[0].y);
+    try testing.expectEqual(@as(f32, 0), ed.render_state.cells.items[1].y);
+    try testing.expectEqual(@as(f32, 0), ed.render_state.cells.items[2].y);
+    try testing.expectEqual(@as(f32, 4), ed.render_state.cursors.items[0].x);
+    try testing.expectEqual(@as(f32, 0), ed.render_state.cursors.items[0].y);
 }

@@ -2,7 +2,7 @@ import AppKit
 import MetalKit
 import MatchaKit
 
-class MetalEditorView: MTKView, MTKViewDelegate {
+class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     let editor: MatchaEditor
     var renderer: MetalRenderer?
     var cursorBlinkTimer: Timer?
@@ -13,7 +13,12 @@ class MetalEditorView: MTKView, MTKViewDelegate {
     // Font metrics (in points)
     var cellWidth: CGFloat = 8.4
     var cellHeight: CGFloat = 18.0
+    var wideCellWidth: CGFloat = 14.0
+    var hangulCellWidth: CGFloat = 14.0
     var font: NSFont
+    private var inputHandled = false
+    private var markedByteRange: Range<UInt32>?
+    private var markedSelectedRange = NSRange(location: NSNotFound, length: 0)
 
     init(editor: MatchaEditor) {
         self.editor = editor
@@ -122,6 +127,46 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         let size = ("M" as NSString).size(withAttributes: attrs)
         cellWidth = ceil(size.width)
         cellHeight = ceil(font.ascender - font.descender + font.leading) + 2
+        wideCellWidth = max(
+            cellWidth,
+            measureWideCellWidth(samples: ["漢", "あ", "ア", "（", "Ａ"])
+        )
+        hangulCellWidth = max(cellWidth, measureWideCellWidth(samples: ["한", "가", "힣"]))
+    }
+
+    private func measureWideCellWidth(samples: [String]) -> CGFloat {
+        let baseFont = font as CTFont
+        var widestAdvance = cellWidth
+
+        for sample in samples {
+            guard let scalar = sample.unicodeScalars.first else { continue }
+
+            var chars: [UniChar] = []
+            let value = scalar.value
+            if value <= 0xFFFF {
+                chars = [UniChar(value)]
+            } else {
+                let hi = ((value - 0x10000) >> 10) + 0xD800
+                let lo = ((value - 0x10000) & 0x3FF) + 0xDC00
+                chars = [UniChar(hi), UniChar(lo)]
+            }
+
+            var glyphs = Array(repeating: CGGlyph(), count: chars.count)
+            CTFontGetGlyphsForCharacters(baseFont, chars, &glyphs, chars.count)
+
+            var renderFont = baseFont
+            if glyphs[0] == 0 {
+                let string = sample as CFString
+                renderFont = CTFontCreateForString(baseFont, string, CFRange(location: 0, length: CFStringGetLength(string)))
+                CTFontGetGlyphsForCharacters(renderFont, chars, &glyphs, chars.count)
+            }
+
+            var advance = CGSize.zero
+            CTFontGetAdvancesForGlyphs(renderFont, .default, glyphs, &advance, 1)
+            widestAdvance = max(widestAdvance, advance.width)
+        }
+
+        return widestAdvance
     }
 
     /// Tell the Zig core about the viewport in **points** (not pixels).
@@ -134,10 +179,165 @@ class MetalEditorView: MTKView, MTKViewDelegate {
             cellWidth: Float(cellWidth),
             cellHeight: Float(cellHeight)
         )
+        editor.setWideCellWidth(Float(wideCellWidth))
+        editor.setHangulCellWidth(Float(hangulCellWidth))
     }
 
     private func requestRedraw() {
         needsDisplay = true
+    }
+
+    private func clearMarkedTextState() {
+        markedByteRange = nil
+        markedSelectedRange = NSRange(location: NSNotFound, length: 0)
+    }
+
+    private func plainString(from value: Any) -> String {
+        if let attributed = value as? NSAttributedString {
+            return attributed.string
+        }
+        if let string = value as? String {
+            return string
+        }
+        return "\(value)"
+    }
+
+    private func clampUTF16Range(_ range: NSRange, maxLength: Int) -> NSRange {
+        guard range.location != NSNotFound else {
+            return NSRange(location: NSNotFound, length: 0)
+        }
+        let start = max(0, min(range.location, maxLength))
+        let end = max(start, min(range.location + range.length, maxLength))
+        return NSRange(location: start, length: end - start)
+    }
+
+    private func utf16RangeToByteRange(_ range: NSRange, in content: String) -> Range<UInt32>? {
+        let clamped = clampUTF16Range(range, maxLength: content.utf16.count)
+        guard clamped.location != NSNotFound else { return nil }
+        let startIndex = String.Index(utf16Offset: clamped.location, in: content)
+        let endIndex = String.Index(utf16Offset: clamped.location + clamped.length, in: content)
+        let byteStart = UInt32(content[..<startIndex].utf8.count)
+        let byteEnd = byteStart + UInt32(content[startIndex..<endIndex].utf8.count)
+        return byteStart..<byteEnd
+    }
+
+    private func byteOffsetToUTF16(_ offset: UInt32, in content: String) -> Int {
+        let clamped = min(Int(offset), content.utf8.count)
+        return String(decoding: content.utf8.prefix(clamped), as: UTF8.self).utf16.count
+    }
+
+    private func currentSelectionByteRange() -> Range<UInt32> {
+        if let selection = editor.getSelectionOffsets() {
+            return selection
+        }
+        let cursor = editor.getCursorOffset()
+        return cursor..<cursor
+    }
+
+    private func replacementByteRange(for replacementRange: NSRange, in content: String) -> Range<UInt32> {
+        if let explicitRange = utf16RangeToByteRange(replacementRange, in: content) {
+            return explicitRange
+        }
+        if let marked = markedByteRange {
+            return marked
+        }
+        return currentSelectionByteRange()
+    }
+
+    private func applyMarkedSelection(text: String, startOffset: UInt32, selectedRange: NSRange) {
+        guard !text.isEmpty else {
+            editor.setCursorOffset(startOffset)
+            return
+        }
+
+        let clamped = clampUTF16Range(selectedRange, maxLength: text.utf16.count)
+        guard let relativeRange = utf16RangeToByteRange(clamped, in: text) else {
+            editor.setCursorOffset(startOffset)
+            return
+        }
+
+        let start = startOffset + relativeRange.lowerBound
+        let end = startOffset + relativeRange.upperBound
+        if clamped.length > 0 {
+            editor.setSelectionOffsets(start: start, end: end)
+        } else {
+            editor.setCursorOffset(start)
+        }
+    }
+
+    private func screenRect(forEditorRect rect: CGRect) -> NSRect {
+        let localRect = NSRect(
+            x: rect.origin.x,
+            y: bounds.height - rect.origin.y - rect.height,
+            width: max(rect.width, 1),
+            height: max(rect.height, 1)
+        )
+        let windowRect = convert(localRect, to: nil)
+        guard let window else { return windowRect }
+        return window.convertToScreen(windowRect)
+    }
+
+    private func handleTextCommand(named selectorName: String) -> Bool {
+        switch selectorName {
+        case "insertNewline:":
+            editor.newline()
+        case "insertTab:":
+            editor.insertTab()
+        case "insertBacktab:":
+            editor.dedent()
+        case "deleteBackward:":
+            editor.deleteBackward()
+        case "deleteForward:":
+            editor.deleteForward()
+        case "deleteWordBackward:":
+            editor.deleteWordBackward()
+        case "deleteWordForward:":
+            editor.deleteWordForward()
+        case "moveLeft:":
+            editor.moveLeft()
+        case "moveRight:":
+            editor.moveRight()
+        case "moveUp:":
+            editor.moveUp()
+        case "moveDown:":
+            editor.moveDown()
+        case "moveWordLeft:":
+            editor.moveWordLeft()
+        case "moveWordRight:":
+            editor.moveWordRight()
+        case "moveToBeginningOfLine:":
+            editor.moveLineStart()
+        case "moveToEndOfLine:":
+            editor.moveLineEnd()
+        case "moveToBeginningOfDocument:":
+            editor.moveStart()
+        case "moveToEndOfDocument:":
+            editor.moveEnd()
+        case "moveLeftAndModifySelection:":
+            editor.selectLeft()
+        case "moveRightAndModifySelection:":
+            editor.selectRight()
+        case "moveUpAndModifySelection:":
+            editor.selectUp()
+        case "moveDownAndModifySelection:":
+            editor.selectDown()
+        case "moveWordLeftAndModifySelection:":
+            editor.selectWordLeft()
+        case "moveWordRightAndModifySelection:":
+            editor.selectWordRight()
+        case "moveToBeginningOfLineAndModifySelection:":
+            editor.selectLineStart()
+        case "moveToEndOfLineAndModifySelection:":
+            editor.selectLineEnd()
+        case "moveToBeginningOfDocumentAndModifySelection:":
+            editor.selectStart()
+        case "moveToEndOfDocumentAndModifySelection:":
+            editor.selectEnd()
+        default:
+            return false
+        }
+        requestRedraw()
+        return true
     }
 
     // MARK: - MTKViewDelegate
@@ -209,13 +409,154 @@ class MetalEditorView: MTKView, MTKViewDelegate {
             }
         }
 
+        inputHandled = false
+        interpretKeyEvents([event])
+        if inputHandled {
+            return
+        }
+
         if KeyEventHandler.dispatch(event: event, editor: editor) {
             editor.updateInfo()
+            requestRedraw()
             return
         }
     }
 
+    override func doCommand(by selector: Selector) {
+        let handled = handleTextCommand(named: NSStringFromSelector(selector))
+        inputHandled = handled
+    }
+
     override func flagsChanged(with event: NSEvent) {}
+
+    // MARK: - Text Input Client
+
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        let plain = plainString(from: string)
+        let existingMarkedRange = markedByteRange
+        let content = editor.getContent() ?? ""
+
+        if let marked = existingMarkedRange {
+            editor.replaceRange(start: marked.lowerBound, end: marked.upperBound, text: plain)
+            editor.setCursorOffset(marked.lowerBound + UInt32(plain.utf8.count))
+        } else if let explicitRange = utf16RangeToByteRange(replacementRange, in: content) {
+            editor.replaceRange(start: explicitRange.lowerBound, end: explicitRange.upperBound, text: plain)
+            editor.setCursorOffset(explicitRange.lowerBound + UInt32(plain.utf8.count))
+        } else {
+            editor.insert(text: plain)
+        }
+
+        clearMarkedTextState()
+        inputHandled = true
+        requestRedraw()
+    }
+
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let plain = plainString(from: string)
+        let content = editor.getContent() ?? ""
+        let replacedRange = replacementByteRange(for: replacementRange, in: content)
+
+        editor.replaceRange(start: replacedRange.lowerBound, end: replacedRange.upperBound, text: plain)
+
+        let startOffset = replacedRange.lowerBound
+        let endOffset = startOffset + UInt32(plain.utf8.count)
+        if plain.isEmpty {
+            clearMarkedTextState()
+            editor.setCursorOffset(startOffset)
+        } else {
+            markedByteRange = startOffset..<endOffset
+            markedSelectedRange = clampUTF16Range(selectedRange, maxLength: plain.utf16.count)
+            applyMarkedSelection(text: plain, startOffset: startOffset, selectedRange: markedSelectedRange)
+        }
+
+        inputHandled = true
+        requestRedraw()
+    }
+
+    func unmarkText() {
+        clearMarkedTextState()
+        inputHandled = true
+        requestRedraw()
+    }
+
+    func selectedRange() -> NSRange {
+        guard let content = editor.getContent() else {
+            return NSRange(location: NSNotFound, length: 0)
+        }
+
+        if let selection = editor.getSelectionOffsets() {
+            let start = byteOffsetToUTF16(selection.lowerBound, in: content)
+            let end = byteOffsetToUTF16(selection.upperBound, in: content)
+            return NSRange(location: start, length: end - start)
+        }
+
+        let cursor = editor.getCursorOffset()
+        let location = byteOffsetToUTF16(cursor, in: content)
+        return NSRange(location: location, length: 0)
+    }
+
+    func markedRange() -> NSRange {
+        guard let marked = markedByteRange, let content = editor.getContent() else {
+            return NSRange(location: NSNotFound, length: 0)
+        }
+
+        let start = byteOffsetToUTF16(marked.lowerBound, in: content)
+        let end = byteOffsetToUTF16(marked.upperBound, in: content)
+        return NSRange(location: start, length: end - start)
+    }
+
+    func hasMarkedText() -> Bool {
+        markedByteRange != nil
+    }
+
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+        []
+    }
+
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        guard let content = editor.getContent() else {
+            actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+            return nil
+        }
+
+        let nsContent = content as NSString
+        let clamped = clampUTF16Range(range, maxLength: nsContent.length)
+        guard clamped.location != NSNotFound else {
+            actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+            return nil
+        }
+
+        actualRange?.pointee = clamped
+        return NSAttributedString(string: nsContent.substring(with: clamped))
+    }
+
+    func characterIndex(for point: NSPoint) -> Int {
+        guard let content = editor.getContent() else { return 0 }
+
+        let localPoint: NSPoint
+        if let window {
+            let windowPoint = window.convertPoint(fromScreen: point)
+            localPoint = convert(windowPoint, from: nil)
+        } else {
+            localPoint = point
+        }
+
+        let offset = editor.hitTestOffset(x: Float(localPoint.x), y: Float(bounds.height - localPoint.y))
+        return byteOffsetToUTF16(offset, in: content)
+    }
+
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        let content = editor.getContent() ?? ""
+        let clamped = clampUTF16Range(range, maxLength: content.utf16.count)
+        let offset = utf16RangeToByteRange(NSRange(location: clamped.location, length: 0), in: content)?.lowerBound
+            ?? editor.getCursorOffset()
+        actualRange?.pointee = NSRange(location: clamped.location == NSNotFound ? 0 : clamped.location, length: 0)
+
+        guard let rect = editor.rectForOffset(offset) else {
+            return .zero
+        }
+        return screenRect(forEditorRect: rect)
+    }
 
     // MARK: - Mouse Input (in points — Zig core works in points)
 

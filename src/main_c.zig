@@ -338,12 +338,52 @@ export fn matcha_editor_get_selection_text(ed: ?*Editor) ?[*:0]u8 {
     return result.ptr;
 }
 
+export fn matcha_editor_get_content(ed: ?*Editor, len: ?*u32) ?[*:0]u8 {
+    const e = ed orelse return null;
+    const content = e.buffer.getContent(e.allocator) catch return null;
+    defer e.allocator.free(content);
+
+    const result = c_allocator.allocSentinel(u8, content.len, 0) catch return null;
+    @memcpy(result[0..content.len], content);
+    if (len) |out_len| out_len.* = @intCast(content.len);
+    return result.ptr;
+}
+
+export fn matcha_editor_get_selection_offsets(ed: ?*Editor, start: ?*u32, end: ?*u32) bool {
+    const e = ed orelse return false;
+    const range = e.selectionPosRange() orelse return false;
+    if (start) |out_start| out_start.* = range.start;
+    if (end) |out_end| out_end.* = range.end;
+    return true;
+}
+
+export fn matcha_editor_get_cursor_offset(ed: ?*Editor) u32 {
+    const e = ed orelse return 0;
+    return e.cursorPos();
+}
+
 export fn matcha_editor_paste(ed: ?*Editor, text: ?[*]const u8, len: u32) void {
     const e = ed orelse return;
     const t = text orelse return;
     e.paste(t[0..len]) catch |err| {
         e.setLastError(err);
     };
+}
+
+export fn matcha_editor_replace_range(ed: ?*Editor, start: u32, end: u32, text: ?[*]const u8, len: u32) void {
+    const e = ed orelse return;
+    const t = text orelse return;
+    e.replaceRangeLiteral(start, end, t[0..len]) catch |err| {
+        e.setLastError(err);
+    };
+}
+
+export fn matcha_editor_set_cursor_offset(ed: ?*Editor, pos: u32) void {
+    if (ed) |e| e.setCursorPos(pos);
+}
+
+export fn matcha_editor_set_selection_offsets(ed: ?*Editor, start: u32, end: u32) void {
+    if (ed) |e| e.setSelectionPosRange(start, end);
 }
 
 export fn matcha_editor_free_string(str: ?[*:0]u8) void {
@@ -608,6 +648,14 @@ export fn matcha_editor_set_viewport(ed: ?*Editor, width: u32, height: u32, cell
     if (ed) |e| e.setViewport(width, height, cell_w, cell_h);
 }
 
+export fn matcha_editor_set_wide_cell_width(ed: ?*Editor, wide_cell_w: f32) void {
+    if (ed) |e| e.setWideCellWidth(wide_cell_w);
+}
+
+export fn matcha_editor_set_hangul_cell_width(ed: ?*Editor, hangul_cell_w: f32) void {
+    if (ed) |e| e.setHangulCellWidth(hangul_cell_w);
+}
+
 export fn matcha_editor_scroll(ed: ?*Editor, dx: f32, dy: f32) void {
     if (ed) |e| e.scroll(dx, dy);
 }
@@ -622,6 +670,21 @@ export fn matcha_editor_double_click(ed: ?*Editor, x: f32, y: f32) void {
 
 export fn matcha_editor_triple_click(ed: ?*Editor, x: f32, y: f32) void {
     if (ed) |e| e.tripleClick(x, y);
+}
+
+export fn matcha_editor_hit_test_offset(ed: ?*Editor, x: f32, y: f32) u32 {
+    const e = ed orelse return 0;
+    return e.screenToPos(x, y);
+}
+
+export fn matcha_editor_get_rect_for_offset(ed: ?*Editor, pos: u32, x: ?*f32, y: ?*f32, w: ?*f32, h: ?*f32) bool {
+    const e = ed orelse return false;
+    const rect = e.rectForPos(pos);
+    if (x) |out_x| out_x.* = rect.x;
+    if (y) |out_y| out_y.* = rect.y;
+    if (w) |out_w| out_w.* = rect.w;
+    if (h) |out_h| out_h.* = rect.h;
+    return true;
 }
 
 export fn matcha_editor_get_scroll_y(ed: ?*Editor) f32 {
@@ -756,4 +819,78 @@ test "main_c: key event handles undo shortcut" {
     }));
 
     try expectEditorContent(&ed, "");
+}
+
+test "main_c: content and selection offsets expose editor state" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("hello");
+    matcha_editor_set_selection_offsets(&ed, 1, 4);
+
+    var len: u32 = 0;
+    const content_ptr = matcha_editor_get_content(&ed, &len).?;
+    defer matcha_editor_free_string(content_ptr);
+    try testing.expectEqual(@as(u32, 5), len);
+    try testing.expectEqualStrings("hello", std.mem.span(content_ptr));
+
+    try testing.expectEqual(@as(u32, 4), matcha_editor_get_cursor_offset(&ed));
+
+    var start: u32 = 0;
+    var end: u32 = 0;
+    try testing.expect(matcha_editor_get_selection_offsets(&ed, &start, &end));
+    try testing.expectEqual(@as(u32, 1), start);
+    try testing.expectEqual(@as(u32, 4), end);
+}
+
+test "main_c: replace range inserts literal text" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("abc");
+    matcha_editor_replace_range(&ed, 1, 2, "(".ptr, 1);
+
+    try expectEditorContent(&ed, "a(c");
+    try testing.expectEqual(@as(u32, 2), ed.cursor.col);
+}
+
+test "main_c: rect and hit test stay aligned for fullwidth characters" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    matcha_editor_set_viewport(&ed, 80, 20, 1, 1);
+    matcha_editor_set_wide_cell_width(&ed, 1.5);
+    try ed.insertText("a好b");
+
+    var x: f32 = 0;
+    var y: f32 = 0;
+    var w: f32 = 0;
+    var h: f32 = 0;
+    try testing.expect(matcha_editor_get_rect_for_offset(&ed, 4, &x, &y, &w, &h));
+    try testing.expectEqual(@as(f32, 2.5), x);
+    try testing.expectEqual(@as(f32, 1), w);
+    try testing.expectEqual(@as(f32, 1), h);
+
+    try testing.expectEqual(@as(u32, 1), matcha_editor_hit_test_offset(&ed, 1.2, 0.5));
+    try testing.expectEqual(@as(u32, 4), matcha_editor_hit_test_offset(&ed, 2.2, 0.5));
+}
+
+test "main_c: wrapped hit testing follows pixel-based row breaks" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    matcha_editor_set_viewport(&ed, 4, 10, 1, 1);
+    matcha_editor_set_wide_cell_width(&ed, 1.5);
+    try ed.insertText("a好bc");
+
+    try testing.expectEqual(@as(u32, 5), matcha_editor_hit_test_offset(&ed, 3.8, 0.5));
 }

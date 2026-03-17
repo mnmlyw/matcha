@@ -9,6 +9,7 @@ const Config = @import("../config/Config.zig").Config;
 const Cell = @import("../render/Cell.zig");
 const RenderState = @import("../render/RenderState.zig").RenderState;
 const Language = @import("../highlight/Language.zig").Language;
+const charWidth = @import("../buffer/UnicodeIterator.zig").charWidth;
 
 pub const Editor = struct {
     pub const FindOptions = struct {
@@ -29,6 +30,8 @@ pub const Editor = struct {
     viewport_height: u32 = 600,
     cell_width: f32 = 8.0,
     cell_height: f32 = 16.0,
+    wide_cell_width: f32 = 0,
+    hangul_cell_width: f32 = 0,
     scroll_x: f32 = 0,
     scroll_y: f32 = 0,
 
@@ -41,6 +44,7 @@ pub const Editor = struct {
 
     // Render-computed max visible line length (set by RenderState.compute)
     max_visible_line_len: u32 = 0,
+    max_visible_line_width: f32 = 0,
 
     // Syntax highlighting
     language: Language = .none,
@@ -52,7 +56,7 @@ pub const Editor = struct {
     // Wrap cache: prefix_sums[i] = total visual rows for lines 0..i-1
     wrap_prefix_sums: std.ArrayListUnmanaged(u32) = .{},
     wrap_cache_edit_counter: u32 = 0xFFFFFFFF,
-    wrap_cache_wrap_col: u32 = 0,
+    wrap_cache_wrap_width_bits: u32 = 0xFFFFFFFF,
 
     // Search cache: contiguous buffer snapshot for repeated find operations
     search_content_cache: std.ArrayListUnmanaged(u8) = .{},
@@ -110,9 +114,11 @@ pub const Editor = struct {
         self.scroll_y = 0;
         self.language = .none;
         self.max_visible_line_len = 0;
+        self.max_visible_line_width = 0;
         self.edit_counter +%= 1;
         self.has_error = false;
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
+        self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
         if (self.filename_z) |z| self.allocator.free(z);
         self.filename_z = null;
         if (self.filename_owned) {
@@ -145,10 +151,12 @@ pub const Editor = struct {
         self.scroll_x = 0;
         self.scroll_y = 0;
         self.max_visible_line_len = 0;
+        self.max_visible_line_width = 0;
         self.language = Language.detectFromFilename(path);
         self.edit_counter +%= 1;
         self.has_error = false;
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
+        self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
         self.filename = new_filename;
         self.filename_owned = true;
         if (self.filename_z) |z| self.allocator.free(z);
@@ -190,6 +198,52 @@ pub const Editor = struct {
 
     fn insertTextLiteral(self: *Editor, text: []const u8) !void {
         try self.insertTextWithOptions(text, false);
+    }
+
+    pub fn cursorPos(self: *const Editor) u32 {
+        return self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+    }
+
+    pub fn selectionPosRange(self: *const Editor) ?struct { start: u32, end: u32 } {
+        if (!self.selection.active) return null;
+        const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+        return .{
+            .start = self.buffer.lineColToPos(range.start_line, range.start_col),
+            .end = self.buffer.lineColToPos(range.end_line, range.end_col),
+        };
+    }
+
+    pub fn setCursorPos(self: *Editor, pos: u32) void {
+        const clamped = @min(pos, self.buffer.totalLength());
+        const lc = self.buffer.posToLineCol(clamped);
+        self.selection.clear();
+        self.cursor.moveTo(lc.line, lc.col);
+        self.cursor.target_col = self.cursor.col;
+        self.ensureCursorVisible();
+    }
+
+    pub fn setSelectionPosRange(self: *Editor, start_pos: u32, end_pos: u32) void {
+        const total = self.buffer.totalLength();
+        const start = @min(start_pos, total);
+        const end = @min(end_pos, total);
+        if (start >= end) {
+            self.setCursorPos(start);
+            return;
+        }
+
+        const start_lc = self.buffer.posToLineCol(start);
+        const end_lc = self.buffer.posToLineCol(end);
+        self.selection.setAnchor(start_lc.line, start_lc.col);
+        self.cursor.moveTo(end_lc.line, end_lc.col);
+        self.cursor.target_col = self.cursor.col;
+        self.ensureCursorVisible();
+    }
+
+    pub fn replaceRangeLiteral(self: *Editor, start_pos: u32, end_pos: u32, text: []const u8) !void {
+        const start = @min(start_pos, end_pos);
+        const end = @max(start_pos, end_pos);
+        self.setSelectionPosRange(start, end);
+        try self.insertTextLiteral(text);
     }
 
     fn insertTextWithOptions(self: *Editor, text: []const u8, allow_auto_pair: bool) !void {
@@ -997,6 +1051,34 @@ pub const Editor = struct {
         self.viewport_height = height;
         self.cell_width = cell_w;
         self.cell_height = cell_h;
+        if (self.wide_cell_width > 0) {
+            self.wide_cell_width = @max(self.wide_cell_width, self.cell_width);
+        }
+        if (self.hangul_cell_width > 0) {
+            self.hangul_cell_width = @max(self.hangul_cell_width, self.cell_width);
+        }
+        self.wrap_cache_edit_counter = 0xFFFFFFFF;
+        self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
+    }
+
+    pub fn setWideCellWidth(self: *Editor, wide_cell_w: f32) void {
+        if (wide_cell_w > 0) {
+            self.wide_cell_width = @max(wide_cell_w, self.cell_width);
+        } else {
+            self.wide_cell_width = 0;
+        }
+        self.wrap_cache_edit_counter = 0xFFFFFFFF;
+        self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
+    }
+
+    pub fn setHangulCellWidth(self: *Editor, hangul_cell_w: f32) void {
+        if (hangul_cell_w > 0) {
+            self.hangul_cell_width = @max(hangul_cell_w, self.cell_width);
+        } else {
+            self.hangul_cell_width = 0;
+        }
+        self.wrap_cache_edit_counter = 0xFFFFFFFF;
+        self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
     }
 
     pub fn scroll(self: *Editor, dx: f32, dy: f32) void {
@@ -1024,8 +1106,7 @@ pub const Editor = struct {
         } else {
             const gutter_w = self.gutterWidth();
             const view_w = @as(f32, @floatFromInt(self.viewport_width)) - gutter_w;
-            const content_w = @as(f32, @floatFromInt(self.max_visible_line_len)) * self.cell_width;
-            const max_scroll_x = @max(0, content_w - view_w);
+            const max_scroll_x = @max(0, self.max_visible_line_width - view_w);
             self.scroll_x = @min(self.scroll_x, max_scroll_x);
         }
     }
@@ -1043,19 +1124,21 @@ pub const Editor = struct {
         if (self.config.wrap_lines) {
             const vrow: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
             const result = self.visualRowToLine(vrow);
-            const seg_vcol: u32 = @intFromFloat(@max(0, text_x / self.cell_width));
-            const total_vcol = result.col_offset + seg_vcol;
-            const byte_col = self.visualColToByteCol(result.line, total_vcol);
+            const byte_col = self.pixelXToByteCol(result.line, text_x, result.segment);
             self.cursor.moveTo(result.line, byte_col);
         } else {
-            const vcol: u32 = @intFromFloat(@max(0, (text_x + self.scroll_x) / self.cell_width));
             const line: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
             const max_line = self.buffer.lineCount() -| 1;
             const clamped_line = @min(line, max_line);
-            const byte_col = self.visualColToByteCol(clamped_line, vcol);
+            const byte_col = self.pixelXToByteCol(clamped_line, text_x + self.scroll_x, null);
             self.cursor.moveTo(clamped_line, byte_col);
         }
         self.clampCursorCol();
+    }
+
+    pub fn screenToPos(self: *Editor, x: f32, y: f32) u32 {
+        const lc = self.screenToLineCol(x, y);
+        return self.buffer.lineColToPos(lc.line, lc.col);
     }
 
     // ── Multi-click ─────────────────────────────────────────────
@@ -1218,16 +1301,13 @@ pub const Editor = struct {
         if (self.config.wrap_lines) {
             const vrow: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
             const result = self.visualRowToLine(vrow);
-            const seg_vcol: u32 = @intFromFloat(@max(0, text_x / self.cell_width));
-            const total_vcol = result.col_offset + seg_vcol;
-            const byte_col = self.visualColToByteCol(result.line, total_vcol);
+            const byte_col = self.pixelXToByteCol(result.line, text_x, result.segment);
             return .{ .line = result.line, .col = byte_col };
         } else {
-            const vcol: u32 = @intFromFloat(@max(0, (text_x + self.scroll_x) / self.cell_width));
             const line: u32 = @intFromFloat(@max(0, (y + self.scroll_y) / self.cell_height));
             const max_line = self.buffer.lineCount() -| 1;
             const clamped_line = @min(line, max_line);
-            const byte_col = self.visualColToByteCol(clamped_line, vcol);
+            const byte_col = self.pixelXToByteCol(clamped_line, text_x + self.scroll_x, null);
             return .{ .line = clamped_line, .col = byte_col };
         }
     }
@@ -1409,9 +1489,123 @@ pub const Editor = struct {
         return @as(f32, @floatFromInt(digits + 1)) * self.cell_width;
     }
 
+    pub fn wideCellPixelWidth(self: *const Editor) f32 {
+        if (self.wide_cell_width > 0) return self.wide_cell_width;
+        return @max(self.cell_width, @as(f32, @floatCast(self.config.font_size)));
+    }
+
+    fn hangulCellPixelWidth(self: *const Editor) f32 {
+        if (self.hangul_cell_width > 0) return self.hangul_cell_width;
+        return self.wideCellPixelWidth();
+    }
+
+    fn isHangulWideCodepoint(cp: u32) bool {
+        if (cp >= 0x1100 and cp <= 0x115F) return true;
+        if (cp >= 0x3130 and cp <= 0x318F) return true;
+        if (cp >= 0xA960 and cp <= 0xA97F) return true;
+        if (cp >= 0xAC00 and cp <= 0xD7AF) return true;
+        return false;
+    }
+
+    pub fn pixelWidthForCodepoint(self: *const Editor, cp: u32) f32 {
+        if (charWidth(cp) <= 1) return self.cell_width;
+        if (isHangulWideCodepoint(cp)) return self.hangulCellPixelWidth();
+        return self.wideCellPixelWidth();
+    }
+
+    pub fn wrapWidthPixels(self: *const Editor) f32 {
+        const gutter_w = self.gutterWidth();
+        const view_w = @as(f32, @floatFromInt(self.viewport_width)) - gutter_w;
+        if (view_w <= 0 or self.cell_width <= 0) {
+            const fallback_cell_w: f32 = if (self.cell_width > 0) self.cell_width else 1;
+            return fallback_cell_w * 80;
+        }
+        return view_w;
+    }
+
+    pub const PixelMetrics = struct {
+        segment: u32,
+        segment_x: f32,
+        total_x: f32,
+    };
+
+    pub fn byteColToPixelMetrics(self: *const Editor, line: u32, byte_col: u32) PixelMetrics {
+        const line_start = self.buffer.lineStart(line);
+        const line_end = self.buffer.lineEnd(line);
+        const line_len = line_end - line_start;
+        const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
+        var pos: u32 = 0;
+        var segment: u32 = 0;
+        var segment_x: f32 = 0;
+        var total_x: f32 = 0;
+
+        while (pos < byte_col and pos < line_len) {
+            if (wrap_width > 0 and segment_x >= wrap_width and segment_x > 0) {
+                segment += 1;
+                segment_x = 0;
+            }
+            const b = self.buffer.byteAt(line_start + pos) orelse break;
+            if (b == '\n') break;
+            const cp = self.buffer.codepointAt(line_start + pos);
+            const char_px_w = self.pixelWidthForCodepoint(cp);
+
+            pos += PieceTable.codepointByteLen(b);
+            total_x += char_px_w;
+            segment_x += char_px_w;
+        }
+
+        return .{
+            .segment = segment,
+            .segment_x = segment_x,
+            .total_x = total_x,
+        };
+    }
+
+    pub fn pixelXToByteCol(self: *const Editor, line: u32, pixel_x: f32, target_segment: ?u32) u32 {
+        const line_start = self.buffer.lineStart(line);
+        const line_end = self.buffer.lineEnd(line);
+        const line_len = line_end - line_start;
+        const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
+        const target_x = @max(0, pixel_x);
+
+        var pos: u32 = 0;
+        var segment: u32 = 0;
+        var segment_x: f32 = 0;
+
+        while (pos < line_len) {
+            if (wrap_width > 0 and segment_x >= wrap_width and segment_x > 0) {
+                if (target_segment) |target| {
+                    if (segment == target) return pos;
+                }
+                segment += 1;
+                segment_x = 0;
+            }
+            const b = self.buffer.byteAt(line_start + pos) orelse break;
+            if (b == '\n') break;
+            const cp = self.buffer.codepointAt(line_start + pos);
+            const cw = charWidth(cp);
+            const cp_len = PieceTable.codepointByteLen(b);
+            const char_px_w = self.pixelWidthForCodepoint(cp);
+
+            if (target_segment == null or segment == target_segment.?) {
+                if (target_x < segment_x + char_px_w) {
+                    if (cw > 1 and target_x >= segment_x + char_px_w / 2.0) {
+                        return pos + cp_len;
+                    }
+                    return pos;
+                }
+            }
+
+            pos += cp_len;
+            segment_x += char_px_w;
+        }
+
+        return pos;
+    }
+
     // ── UTF-8 column helpers ─────────────────────────────────
 
-    /// Convert byte column to visual column (codepoint count).
+    /// Convert byte column to visual column (accounts for double-width CJK chars).
     pub fn byteColToVisualCol(self: *const Editor, line: u32, byte_col: u32) u32 {
         const line_start = self.buffer.lineStart(line);
         var pos: u32 = 0;
@@ -1419,13 +1613,14 @@ pub const Editor = struct {
         while (pos < byte_col) {
             const b = self.buffer.byteAt(line_start + pos) orelse break;
             if (b == '\n') break;
+            const cp = self.buffer.codepointAt(line_start + pos);
             pos += PieceTable.codepointByteLen(b);
-            vcol += 1;
+            vcol += charWidth(cp);
         }
         return vcol;
     }
 
-    /// Convert visual column to byte column.
+    /// Convert visual column to byte column (accounts for double-width CJK chars).
     pub fn visualColToByteCol(self: *const Editor, line: u32, vcol: u32) u32 {
         const line_start = self.buffer.lineStart(line);
         const line_end = self.buffer.lineEnd(line);
@@ -1435,8 +1630,9 @@ pub const Editor = struct {
         while (pos < line_len and v < vcol) {
             const b = self.buffer.byteAt(line_start + pos) orelse break;
             if (b == '\n') break;
+            const cp = self.buffer.codepointAt(line_start + pos);
             pos += PieceTable.codepointByteLen(b);
-            v += 1;
+            v += charWidth(cp);
         }
         return pos;
     }
@@ -1453,18 +1649,19 @@ pub const Editor = struct {
 
     /// Ensure the wrap prefix-sum cache is up to date.
     fn ensureWrapCache(self: *Editor) void {
-        const wc = if (self.config.wrap_lines) self.wrapCol() else 0;
-        if (self.wrap_cache_edit_counter == self.edit_counter and self.wrap_cache_wrap_col == wc) return;
-        self.rebuildWrapCache(wc);
+        const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
+        const wrap_width_bits: u32 = @bitCast(wrap_width);
+        if (self.wrap_cache_edit_counter == self.edit_counter and self.wrap_cache_wrap_width_bits == wrap_width_bits) return;
+        self.rebuildWrapCache(wrap_width);
     }
 
     /// Rebuild wrap cache by scanning all piece bytes in one pass.
-    fn rebuildWrapCache(self: *Editor, wc: u32) void {
+    fn rebuildWrapCache(self: *Editor, wrap_width: f32) void {
         const line_count = self.buffer.lineCount();
         self.wrap_prefix_sums.clearRetainingCapacity();
         self.wrap_prefix_sums.ensureTotalCapacity(self.allocator, line_count + 1) catch return;
 
-        if (!self.config.wrap_lines or wc == 0) {
+        if (!self.config.wrap_lines or wrap_width <= 0) {
             // No wrapping: visual row i = line i
             var i: u32 = 0;
             while (i <= line_count) : (i += 1) {
@@ -1472,33 +1669,47 @@ pub const Editor = struct {
             }
         } else {
             self.wrap_prefix_sums.appendAssumeCapacity(0);
-            var vcols: u32 = 0;
             var running: u32 = 0;
+            var line_rows: u32 = 1;
+            var segment_x: f32 = 0;
 
+            var abs_pos: u32 = 0;
             var pi: usize = 0;
             while (pi < self.buffer.pieceCount()) : (pi += 1) {
                 const slice = self.buffer.pieceBytes(pi);
                 for (slice) |b| {
                     if (b == '\n') {
-                        const vrows = if (vcols == 0) @as(u32, 1) else @max(1, (vcols + wc - 1) / wc);
-                        running += vrows;
+                        running += line_rows;
                         self.wrap_prefix_sums.append(self.allocator, running) catch return;
-                        vcols = 0;
-                    } else if (b < 0x80 or b >= 0xC0) {
-                        vcols += 1;
+                        line_rows = 1;
+                        segment_x = 0;
+                    } else if (b < 0x80) {
+                        if (segment_x >= wrap_width and segment_x > 0) {
+                            line_rows += 1;
+                            segment_x = 0;
+                        }
+                        segment_x += self.cell_width;
+                    } else if (b >= 0xC0) {
+                        if (segment_x >= wrap_width and segment_x > 0) {
+                            line_rows += 1;
+                            segment_x = 0;
+                        }
+                        const cp = self.buffer.codepointAt(abs_pos);
+                        segment_x += self.pixelWidthForCodepoint(cp);
                     }
+                    // else: continuation byte, skip
+                    abs_pos += 1;
                 }
             }
             // Last line (no trailing newline)
             if (self.wrap_prefix_sums.items.len <= line_count) {
-                const vrows = if (vcols == 0) @as(u32, 1) else @max(1, (vcols + wc - 1) / wc);
-                running += vrows;
+                running += line_rows;
                 self.wrap_prefix_sums.append(self.allocator, running) catch return;
             }
         }
 
         self.wrap_cache_edit_counter = self.edit_counter;
-        self.wrap_cache_wrap_col = wc;
+        self.wrap_cache_wrap_width_bits = @bitCast(wrap_width);
     }
 
     /// O(1): visual rows for a buffer line.
@@ -1529,12 +1740,12 @@ pub const Editor = struct {
         return self.buffer.lineCount();
     }
 
-    /// O(log n): convert visual row to buffer line + visual column offset.
-    pub fn visualRowToLine(self: *Editor, vrow: u32) struct { line: u32, col_offset: u32 } {
-        if (!self.config.wrap_lines) return .{ .line = @min(vrow, self.buffer.lineCount() -| 1), .col_offset = 0 };
+    /// O(log n): convert visual row to buffer line + wrapped segment index.
+    pub fn visualRowToLine(self: *Editor, vrow: u32) struct { line: u32, segment: u32 } {
+        if (!self.config.wrap_lines) return .{ .line = @min(vrow, self.buffer.lineCount() -| 1), .segment = 0 };
         self.ensureWrapCache();
         const sums = self.wrap_prefix_sums.items;
-        if (sums.len < 2) return .{ .line = 0, .col_offset = 0 };
+        if (sums.len < 2) return .{ .line = 0, .segment = 0 };
 
         // Binary search: largest i where sums[i] <= vrow
         var lo: u32 = 0;
@@ -1549,7 +1760,24 @@ pub const Editor = struct {
         }
 
         const segment = vrow -| sums[lo];
-        return .{ .line = lo, .col_offset = segment * self.wrapCol() };
+        return .{ .line = lo, .segment = segment };
+    }
+
+    pub fn rectForPos(self: *Editor, pos: u32) Cell.RenderRect {
+        const clamped = @min(pos, self.buffer.totalLength());
+        const lc = self.buffer.posToLineCol(clamped);
+        const wrap_enabled = self.config.wrap_lines;
+        const gutter_w = self.gutterWidth();
+        const metrics = self.byteColToPixelMetrics(lc.line, lc.col);
+        const base_vrow = if (wrap_enabled) self.lineToVisualRow(lc.line) else lc.line;
+        return .{
+            .x = (if (wrap_enabled) metrics.segment_x else metrics.total_x) + gutter_w -
+                if (!wrap_enabled) self.scroll_x else @as(f32, 0),
+            .y = @as(f32, @floatFromInt(base_vrow + metrics.segment)) * self.cell_height - self.scroll_y,
+            .w = self.cell_width,
+            .h = self.cell_height,
+            .color = self.config.cursor_color,
+        };
     }
 
     const LineRange = struct {
@@ -1848,15 +2076,13 @@ pub const Editor = struct {
     }
 
     fn ensureCursorVisible(self: *Editor) void {
-        const vcol = self.byteColToVisualCol(self.cursor.line, self.cursor.col);
+        const metrics = self.byteColToPixelMetrics(self.cursor.line, self.cursor.col);
         const view_h = @as(f32, @floatFromInt(self.viewport_height));
         const view_w = @as(f32, @floatFromInt(self.viewport_width)) - self.gutterWidth();
 
         if (self.config.wrap_lines) {
-            const w = self.wrapCol();
             const base_vrow = self.lineToVisualRow(self.cursor.line);
-            const seg: u32 = if (w > 0) vcol / w else 0;
-            const cursor_vrow = base_vrow + seg;
+            const cursor_vrow = base_vrow + metrics.segment;
             const cursor_y = @as(f32, @floatFromInt(cursor_vrow)) * self.cell_height;
 
             if (cursor_y < self.scroll_y) {
@@ -1867,7 +2093,7 @@ pub const Editor = struct {
             self.scroll_x = 0;
         } else {
             const cursor_y = @as(f32, @floatFromInt(self.cursor.line)) * self.cell_height;
-            const cursor_x = @as(f32, @floatFromInt(vcol)) * self.cell_width;
+            const cursor_x = metrics.total_x;
 
             if (cursor_y < self.scroll_y) {
                 self.scroll_y = cursor_y;
@@ -2415,4 +2641,41 @@ test "Editor: non-wrapped horizontal scroll uses full line width" {
     ed.scroll(100, 0);
 
     try testing.expectEqual(@as(f32, 6), ed.scroll_x);
+}
+
+test "Editor: click maps fullwidth characters on cell boundaries" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(80, 20, 1, 1);
+    ed.setWideCellWidth(1.5);
+    try ed.insertText("a好b");
+
+    ed.click(1.2, 0.5, false);
+    try testing.expectEqual(@as(u32, 1), ed.cursor.col);
+
+    ed.click(2.2, 0.5, false);
+    try testing.expectEqual(@as(u32, 4), ed.cursor.col);
+}
+
+test "Editor: exact-fit wrapped CJK stays on one visual row" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(4, 10, 1, 1);
+    ed.setWideCellWidth(1.5);
+    try ed.insertText("a好好");
+
+    try testing.expectEqual(@as(u32, 1), ed.lineVisualRows(0));
+
+    const rect = ed.rectForPos(7);
+    try testing.expectEqual(@as(f32, 4), rect.x);
+    try testing.expectEqual(@as(f32, 0), rect.y);
 }
