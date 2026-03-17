@@ -1,3 +1,40 @@
+/// Returns the display width of a Unicode codepoint.
+/// CJK ideographs and fullwidth forms return 2; everything else returns 1.
+pub fn charWidth(cp: u32) u2 {
+    // Fast path: ASCII and Latin
+    if (cp < 0x1100) return 1;
+
+    // Hangul Jamo
+    if (cp <= 0x115F) return 2;
+    if (cp < 0x2E80) return 1;
+
+    // CJK Radicals, Kangxi, CJK Symbols, Hiragana, Katakana, Bopomofo, etc.
+    if (cp <= 0x303E) return 2;
+    if (cp < 0x3040) return 1;
+    // Hiragana through CJK Strokes, CJK Extension A, CJK Unified, Yi, Hangul
+    if (cp <= 0xA4CF) return 2;
+    if (cp < 0xAC00) return 1;
+    // Hangul Syllables
+    if (cp <= 0xD7AF) return 2;
+    if (cp < 0xF900) return 1;
+    // CJK Compatibility Ideographs
+    if (cp <= 0xFAFF) return 2;
+    if (cp < 0xFE10) return 1;
+    // Vertical forms, CJK Compat Forms, Small Form Variants
+    if (cp <= 0xFE6F) return 2;
+    if (cp < 0xFF01) return 1;
+    // Fullwidth ASCII variants
+    if (cp <= 0xFF60) return 2;
+    if (cp < 0xFFE0) return 1;
+    // Fullwidth signs
+    if (cp <= 0xFFE6) return 2;
+    if (cp < 0x20000) return 1;
+    // CJK Unified Ideographs Extension B through G and beyond
+    if (cp <= 0x3FFFD) return 2;
+
+    return 1;
+}
+
 /// UTF-8 aware iteration over byte sequences.
 /// For v0.1, we treat bytes as ASCII/UTF-8 code units.
 /// Full grapheme cluster support is deferred.

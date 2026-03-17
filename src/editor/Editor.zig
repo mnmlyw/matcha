@@ -9,6 +9,7 @@ const Config = @import("../config/Config.zig").Config;
 const Cell = @import("../render/Cell.zig");
 const RenderState = @import("../render/RenderState.zig").RenderState;
 const Language = @import("../highlight/Language.zig").Language;
+const charWidth = @import("../buffer/UnicodeIterator.zig").charWidth;
 
 pub const Editor = struct {
     pub const FindOptions = struct {
@@ -1411,7 +1412,7 @@ pub const Editor = struct {
 
     // ── UTF-8 column helpers ─────────────────────────────────
 
-    /// Convert byte column to visual column (codepoint count).
+    /// Convert byte column to visual column (accounts for double-width CJK chars).
     pub fn byteColToVisualCol(self: *const Editor, line: u32, byte_col: u32) u32 {
         const line_start = self.buffer.lineStart(line);
         var pos: u32 = 0;
@@ -1419,13 +1420,14 @@ pub const Editor = struct {
         while (pos < byte_col) {
             const b = self.buffer.byteAt(line_start + pos) orelse break;
             if (b == '\n') break;
+            const cp = self.buffer.codepointAt(line_start + pos);
             pos += PieceTable.codepointByteLen(b);
-            vcol += 1;
+            vcol += charWidth(cp);
         }
         return vcol;
     }
 
-    /// Convert visual column to byte column.
+    /// Convert visual column to byte column (accounts for double-width CJK chars).
     pub fn visualColToByteCol(self: *const Editor, line: u32, vcol: u32) u32 {
         const line_start = self.buffer.lineStart(line);
         const line_end = self.buffer.lineEnd(line);
@@ -1435,8 +1437,9 @@ pub const Editor = struct {
         while (pos < line_len and v < vcol) {
             const b = self.buffer.byteAt(line_start + pos) orelse break;
             if (b == '\n') break;
+            const cp = self.buffer.codepointAt(line_start + pos);
             pos += PieceTable.codepointByteLen(b);
-            v += 1;
+            v += charWidth(cp);
         }
         return pos;
     }
@@ -1475,6 +1478,7 @@ pub const Editor = struct {
             var vcols: u32 = 0;
             var running: u32 = 0;
 
+            var abs_pos: u32 = 0;
             var pi: usize = 0;
             while (pi < self.buffer.pieceCount()) : (pi += 1) {
                 const slice = self.buffer.pieceBytes(pi);
@@ -1484,9 +1488,15 @@ pub const Editor = struct {
                         running += vrows;
                         self.wrap_prefix_sums.append(self.allocator, running) catch return;
                         vcols = 0;
-                    } else if (b < 0x80 or b >= 0xC0) {
-                        vcols += 1;
+                    } else if (b < 0x80) {
+                        vcols += 1; // ASCII is always width 1
+                    } else if (b >= 0xC0) {
+                        // Start of multi-byte codepoint — decode and check width
+                        const cp = self.buffer.codepointAt(abs_pos);
+                        vcols += charWidth(cp);
                     }
+                    // else: continuation byte, skip
+                    abs_pos += 1;
                 }
             }
             // Last line (no trailing newline)

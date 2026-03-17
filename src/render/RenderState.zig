@@ -4,6 +4,7 @@ const Cell = @import("Cell.zig");
 const Lexer = @import("../highlight/Lexer.zig");
 const Language = @import("../highlight/Language.zig").Language;
 const PieceTable = @import("../buffer/PieceTable.zig").PieceTable;
+const charWidth = @import("../buffer/UnicodeIterator.zig").charWidth;
 
 const CellList = std.ArrayListUnmanaged(Cell.RenderCell);
 const CursorList = std.ArrayListUnmanaged(Cell.RenderCursor);
@@ -236,16 +237,7 @@ pub const RenderState = struct {
         var current_vrow = scan_vrow;
         var line: u32 = first_line;
         while (line < line_count and current_vrow < first_vrow + visible_vrows) : (line += 1) {
-            // Get line content
-            const line_start = editor.buffer.lineStart(line);
-            const line_end = editor.buffer.lineEnd(line);
-            var content_len = line_end - line_start;
-            if (content_len > 0) {
-                if (editor.buffer.byteAt(line_start + content_len - 1)) |b| {
-                    if (b == '\n') content_len -= 1;
-                }
-            }
-
+            // Tokenize first (may populate scratch_line internally)
             var tokens: ?[]const Lexer.Token = null;
             if (highlight) {
                 const entry = self.lineTokens(editor, line, line_state, lang) catch null;
@@ -255,11 +247,22 @@ pub const RenderState = struct {
                 }
             }
 
+            // Copy line content into scratch buffer for direct iteration
+            const line_data = self.lineBytes(editor, line) catch {
+                current_vrow += 1;
+                continue;
+            };
+            const content_len: u32 = @intCast(line_data.len);
+
             var token_idx: u32 = 0;
 
             // Iterate characters with UTF-8 and wrapping
             var col: u32 = 0; // byte offset within line
-            var vcol: u32 = 0; // visual column (codepoint count)
+            var vcol: u32 = 0; // visual column (grid units, CJK = 2)
+            var seg_x_offset: f32 = 0; // pixel offset within current wrap segment
+            var last_seg: u32 = 0;
+            // CJK characters use font_size as visual width instead of cell_w * 2
+            const wide_cell_w: f32 = @max(cell_w, @as(f32, @floatCast(config.font_size)));
 
             // Render line number on first visual row
             const line_base_vrow = current_vrow;
@@ -285,24 +288,31 @@ pub const RenderState = struct {
             }
 
             while (col < content_len) {
-                const byte = editor.buffer.byteAt(line_start + col) orelse break;
+                const byte = line_data[col];
                 if (byte == '\n') break;
 
                 const cp_len = PieceTable.codepointByteLen(byte);
-                const codepoint = editor.buffer.codepointAt(line_start + col);
+                const codepoint = decodeCodepointFromSlice(line_data, col);
+                const cw: u32 = charWidth(codepoint);
+                const char_px_w: f32 = if (cw > 1) wide_cell_w else cell_w;
 
                 // Compute visual position
                 const seg: u32 = if (wrap_enabled) vcol / wrap_col else 0;
-                const seg_col: u32 = if (wrap_enabled) vcol % wrap_col else vcol;
                 const vrow = line_base_vrow + seg;
+
+                // Reset segment pixel offset on new wrap segment
+                if (seg != last_seg) {
+                    seg_x_offset = 0;
+                    last_seg = seg;
+                }
 
                 const y = @as(f32, @floatFromInt(vrow)) * cell_h - editor.scroll_y;
                 const x = if (wrap_enabled)
-                    @as(f32, @floatFromInt(seg_col)) * cell_w + gutter_w
+                    seg_x_offset + gutter_w
                 else
-                    @as(f32, @floatFromInt(seg_col)) * cell_w - editor.scroll_x + gutter_w;
+                    seg_x_offset - editor.scroll_x + gutter_w;
 
-                if (y + cell_h >= 0 and y <= vp_h and x + cell_w >= 0 and x <= vp_w) {
+                if (y + cell_h >= 0 and y <= vp_h and x + char_px_w >= 0 and x <= vp_w) {
                     var bg_color = config.bg_color;
 
                     // Selection highlight
@@ -331,7 +341,7 @@ pub const RenderState = struct {
                     self.cells.append(self.allocator, .{
                         .x = x,
                         .y = y,
-                        .w = cell_w,
+                        .w = char_px_w,
                         .h = cell_h,
                         .fg = fg_color,
                         .bg = bg_color,
@@ -341,7 +351,8 @@ pub const RenderState = struct {
                 }
 
                 col += cp_len;
-                vcol += 1;
+                vcol += cw;
+                seg_x_offset += char_px_w;
             }
 
             // Track the full line width, not just currently visible cells.
@@ -512,6 +523,24 @@ pub const RenderState = struct {
         return true;
     }
 };
+
+fn decodeCodepointFromSlice(data: []const u8, pos: u32) u32 {
+    const p: usize = pos;
+    if (p >= data.len) return 0xFFFD;
+    const b0 = data[p];
+    if (b0 < 0x80) return b0;
+    if (b0 < 0xC0) return 0xFFFD;
+    if (b0 < 0xE0) {
+        if (p + 1 >= data.len) return 0xFFFD;
+        return (@as(u32, b0 & 0x1F) << 6) | @as(u32, data[p + 1] & 0x3F);
+    }
+    if (b0 < 0xF0) {
+        if (p + 2 >= data.len) return 0xFFFD;
+        return (@as(u32, b0 & 0x0F) << 12) | (@as(u32, data[p + 1] & 0x3F) << 6) | @as(u32, data[p + 2] & 0x3F);
+    }
+    if (p + 3 >= data.len) return 0xFFFD;
+    return (@as(u32, b0 & 0x07) << 18) | (@as(u32, data[p + 1] & 0x3F) << 12) | (@as(u32, data[p + 2] & 0x3F) << 6) | @as(u32, data[p + 3] & 0x3F);
+}
 
 const testing = std.testing;
 const Config = @import("../config/Config.zig").Config;
