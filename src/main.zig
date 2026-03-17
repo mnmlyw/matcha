@@ -3,6 +3,7 @@
 
 pub const PieceTable = @import("buffer/PieceTable.zig").PieceTable;
 pub const Editor = @import("editor/Editor.zig").Editor;
+pub const FindOptions = Editor.FindOptions;
 pub const Cursor = @import("editor/Cursor.zig").Cursor;
 pub const Selection = @import("editor/Selection.zig").Selection;
 pub const UndoStack = @import("editor/UndoStack.zig").UndoStack;

@@ -54,6 +54,14 @@ pub const Language = enum {
         return .none;
     }
 
+    pub fn lineCommentPrefix(self: Language) ?[]const u8 {
+        return switch (self) {
+            .zig, .swift, .c, .javascript, .rust, .go => "//",
+            .python, .shell, .toml, .yaml => "#",
+            else => null,
+        };
+    }
+
     fn extensionOf(name: []const u8) ?[]const u8 {
         // Find the last '/' or '\' to get the basename
         var basename = name;
@@ -97,4 +105,13 @@ test "Language: detect from filename" {
 test "Language: detect with path" {
     try std.testing.expectEqual(Language.zig, Language.detectFromFilename("/home/user/project/src/main.zig"));
     try std.testing.expectEqual(Language.python, Language.detectFromFilename("../scripts/run.py"));
+}
+
+test "Language: line comment prefixes" {
+    try std.testing.expectEqualStrings("//", Language.zig.lineCommentPrefix().?);
+    try std.testing.expectEqualStrings("//", Language.swift.lineCommentPrefix().?);
+    try std.testing.expectEqualStrings("#", Language.python.lineCommentPrefix().?);
+    try std.testing.expectEqualStrings("#", Language.yaml.lineCommentPrefix().?);
+    try std.testing.expect(Language.markdown.lineCommentPrefix() == null);
+    try std.testing.expect(Language.none.lineCommentPrefix() == null);
 }

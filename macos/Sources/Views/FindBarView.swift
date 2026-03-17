@@ -4,8 +4,14 @@ struct FindBarView: View {
     @ObservedObject var editor: MatchaEditor
     @Binding var isVisible: Bool
     @Binding var showReplace: Bool
-    @State private var searchText = ""
-    @State private var replaceText = ""
+    @Binding var searchText: String
+    @Binding var replaceText: String
+    @Binding var caseSensitive: Bool
+    @Binding var wholeWord: Bool
+    let onFindNext: () -> Void
+    let onFindPrev: () -> Void
+    let onReplaceNext: () -> Void
+    let onReplaceAll: () -> Void
     @FocusState private var searchFieldFocused: Bool
 
     var body: some View {
@@ -21,25 +27,35 @@ struct FindBarView: View {
                     .font(.system(size: 12, design: .monospaced))
                     .focused($searchFieldFocused)
                     .onSubmit {
-                        _ = editor.findNext(query: searchText)
+                        onFindNext()
                     }
                     .onChange(of: searchText) {
                         if !searchText.isEmpty {
-                            _ = editor.findNext(query: searchText)
+                            onFindNext()
                         }
                     }
 
-                Button(action: { _ = editor.findPrev(query: searchText) }) {
+                Button(action: onFindPrev) {
                     Image(systemName: "chevron.up")
                 }
                 .buttonStyle(.borderless)
                 .keyboardShortcut("g", modifiers: [.command, .shift])
 
-                Button(action: { _ = editor.findNext(query: searchText) }) {
+                Button(action: onFindNext) {
                     Image(systemName: "chevron.down")
                 }
                 .buttonStyle(.borderless)
                 .keyboardShortcut("g", modifiers: .command)
+
+                Toggle("Aa", isOn: $caseSensitive)
+                    .toggleStyle(.button)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .help("Case Sensitive")
+
+                Toggle("Word", isOn: $wholeWord)
+                    .toggleStyle(.button)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .help("Whole Word")
 
                 Button(action: { showReplace.toggle() }) {
                     Image(systemName: "arrow.2.squarepath")
@@ -64,17 +80,17 @@ struct FindBarView: View {
                         .textFieldStyle(.plain)
                         .font(.system(size: 12, design: .monospaced))
                         .onSubmit {
-                            _ = editor.replaceNext(query: searchText, replacement: replaceText)
+                            onReplaceNext()
                         }
 
                     Button("Replace") {
-                        _ = editor.replaceNext(query: searchText, replacement: replaceText)
+                        onReplaceNext()
                     }
                     .buttonStyle(.borderless)
                     .font(.system(size: 11))
 
                     Button("All") {
-                        _ = editor.replaceAll(query: searchText, replacement: replaceText)
+                        onReplaceAll()
                     }
                     .buttonStyle(.borderless)
                     .font(.system(size: 11))
@@ -91,10 +107,20 @@ struct FindBarView: View {
                 searchText = sel
             }
         }
+        .onChange(of: caseSensitive) {
+            if !searchText.isEmpty {
+                onFindNext()
+            }
+        }
+        .onChange(of: wholeWord) {
+            if !searchText.isEmpty {
+                onFindNext()
+            }
+        }
     }
 
     private func close() {
         isVisible = false
-        searchText = ""
+        showReplace = false
     }
 }
