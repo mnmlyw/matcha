@@ -11,6 +11,11 @@ const RenderState = @import("../render/RenderState.zig").RenderState;
 const Language = @import("../highlight/Language.zig").Language;
 
 pub const Editor = struct {
+    pub const FindOptions = struct {
+        case_sensitive: bool = true,
+        whole_word: bool = false,
+    };
+
     allocator: Allocator,
     buffer: PieceTable,
     cursor: Cursor,
@@ -30,6 +35,7 @@ pub const Editor = struct {
     // File state
     filename: ?[]const u8 = null,
     filename_owned: bool = false,
+    filename_z: ?[:0]u8 = null, // cached null-terminated copy for C API
     modified: bool = false,
     edit_counter: u32 = 0,
 
@@ -65,6 +71,7 @@ pub const Editor = struct {
         self.undo_stack.deinit();
         self.render_state.deinit();
         self.wrap_prefix_sums.deinit(self.allocator);
+        if (self.filename_z) |z| self.allocator.free(z);
         if (self.filename_owned) {
             if (self.filename) |f| self.allocator.free(f);
         }
@@ -101,6 +108,8 @@ pub const Editor = struct {
         self.edit_counter +%= 1;
         self.has_error = false;
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
+        if (self.filename_z) |z| self.allocator.free(z);
+        self.filename_z = null;
         if (self.filename_owned) {
             if (self.filename) |f| self.allocator.free(f);
         }
@@ -137,6 +146,8 @@ pub const Editor = struct {
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
         self.filename = new_filename;
         self.filename_owned = true;
+        if (self.filename_z) |z| self.allocator.free(z);
+        self.filename_z = self.allocator.dupeZ(u8, new_filename) catch null;
 
         if (old_filename) |f| self.allocator.free(f);
     }
@@ -160,6 +171,8 @@ pub const Editor = struct {
             }
             self.filename = try self.allocator.dupe(u8, path);
             self.filename_owned = true;
+            if (self.filename_z) |z| self.allocator.free(z);
+            self.filename_z = self.allocator.dupeZ(u8, path) catch null;
         }
         self.modified = false;
     }
@@ -167,6 +180,8 @@ pub const Editor = struct {
     // ── Editing ────────────────────────────────────────────────
 
     pub fn insertText(self: *Editor, text: []const u8) !void {
+        if (try self.handleAutoPair(text)) return;
+
         // If there's a selection, delete it first
         if (self.selection.active) {
             try self.deleteSelection();
@@ -255,6 +270,54 @@ pub const Editor = struct {
         self.edit_counter +%= 1;
 
         try self.undo_stack.commit();
+    }
+
+    pub fn deleteWordBackward(self: *Editor) !void {
+        if (self.selection.active) {
+            try self.deleteSelection();
+            return;
+        }
+
+        const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        const start_pos = self.wordBoundaryLeft(pos);
+        if (start_pos == pos) return;
+
+        const deleted = try self.buffer.getRange(self.allocator, start_pos, pos);
+        defer self.allocator.free(deleted);
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        try self.undo_stack.record(.delete, start_pos, deleted);
+        try self.buffer.delete(start_pos, pos - start_pos);
+        try self.undo_stack.commit();
+
+        const lc = self.buffer.posToLineCol(start_pos);
+        self.cursor.moveTo(lc.line, lc.col);
+        self.modified = true;
+        self.edit_counter +%= 1;
+        self.ensureCursorVisible();
+    }
+
+    pub fn deleteWordForward(self: *Editor) !void {
+        if (self.selection.active) {
+            try self.deleteSelection();
+            return;
+        }
+
+        const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        const end_pos = self.wordBoundaryRight(pos);
+        if (end_pos == pos) return;
+
+        const deleted = try self.buffer.getRange(self.allocator, pos, end_pos);
+        defer self.allocator.free(deleted);
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        try self.undo_stack.record(.delete, pos, deleted);
+        try self.buffer.delete(pos, end_pos - pos);
+        try self.undo_stack.commit();
+
+        self.modified = true;
+        self.edit_counter +%= 1;
+        self.ensureCursorVisible();
     }
 
     pub fn newline(self: *Editor) !void {
@@ -445,6 +508,247 @@ pub const Editor = struct {
         self.ensureCursorVisible();
     }
 
+    pub fn toggleComment(self: *Editor) !void {
+        const prefix = self.language.lineCommentPrefix() orelse return;
+        const line_range = self.selectedLineRange();
+        const line_count = self.buffer.lineCount();
+        const start_line = @min(line_range.start_line, line_count -| 1);
+        const end_line = @min(line_range.end_line, line_count -| 1);
+
+        // Determine whether to comment or uncomment
+        var has_content_line = false;
+        var should_uncomment = true;
+        {
+            var li = start_line;
+            while (li <= end_line) : (li += 1) {
+                const ls = self.buffer.lineStart(li);
+                const le = self.buffer.lineEnd(li);
+                const indent = self.lineIndentBytes(ls, le);
+                if (indent == le - ls) continue; // blank line
+                has_content_line = true;
+                if (!self.bufferStartsWith(ls + indent, prefix)) {
+                    should_uncomment = false;
+                    break;
+                }
+            }
+        }
+        if (!has_content_line) return;
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+
+        var cursor_col_delta: i32 = 0;
+        var anchor_col_delta: i32 = 0;
+        const prefix_len: u32 = @intCast(prefix.len);
+
+        // Process lines in reverse order to preserve byte positions
+        var li = end_line;
+        while (true) {
+            const ls = self.buffer.lineStart(li);
+            const le = self.buffer.lineEnd(li);
+            const indent = self.lineIndentBytes(ls, le);
+
+            if (indent != le - ls) { // skip blank lines
+                const prefix_start = ls + indent;
+                if (should_uncomment) {
+                    // Delete comment prefix (and optional trailing space)
+                    var remove_len: u32 = prefix_len;
+                    if (self.buffer.byteAt(prefix_start + remove_len)) |b| {
+                        if (b == ' ') remove_len += 1;
+                    }
+                    const removed = try self.buffer.getRange(self.allocator, prefix_start, prefix_start + remove_len);
+                    defer self.allocator.free(removed);
+                    try self.undo_stack.record(.delete, prefix_start, removed);
+                    try self.buffer.delete(prefix_start, remove_len);
+
+                    if (li == self.cursor.line and self.cursor.col > indent) {
+                        cursor_col_delta = -@as(i32, @intCast(remove_len));
+                    }
+                    if (self.selection.active and li == self.selection.anchor_line and self.selection.anchor_col > indent) {
+                        anchor_col_delta = -@as(i32, @intCast(remove_len));
+                    }
+                } else {
+                    // Insert comment prefix + space
+                    var insert_buf: [16]u8 = undefined;
+                    @memcpy(insert_buf[0..prefix.len], prefix);
+                    insert_buf[prefix.len] = ' ';
+                    const insert_text = insert_buf[0 .. prefix.len + 1];
+
+                    try self.undo_stack.record(.insert, prefix_start, insert_text);
+                    try self.buffer.insert(prefix_start, insert_text);
+
+                    const added: u32 = @intCast(insert_text.len);
+                    if (li == self.cursor.line and self.cursor.col >= indent) {
+                        cursor_col_delta = @intCast(added);
+                    }
+                    if (self.selection.active and li == self.selection.anchor_line and self.selection.anchor_col >= indent) {
+                        anchor_col_delta = @intCast(added);
+                    }
+                }
+            }
+
+            if (li == start_line) break;
+            li -= 1;
+        }
+
+        try self.undo_stack.commit();
+        self.modified = true;
+        self.edit_counter +%= 1;
+
+        // Adjust cursor and anchor columns
+        if (cursor_col_delta < 0) {
+            self.cursor.col -|= @intCast(@abs(cursor_col_delta));
+        } else {
+            self.cursor.col +|= @intCast(@as(u32, @intCast(cursor_col_delta)));
+        }
+        self.cursor.target_col = self.cursor.col;
+
+        if (self.selection.active) {
+            if (anchor_col_delta < 0) {
+                self.selection.anchor_col -|= @intCast(@abs(anchor_col_delta));
+            } else {
+                self.selection.anchor_col +|= @intCast(@as(u32, @intCast(anchor_col_delta)));
+            }
+        }
+        self.ensureCursorVisible();
+    }
+
+    pub fn duplicateLine(self: *Editor) !void {
+        const line_range = self.selectedLineRange();
+        const line_count = self.buffer.lineCount();
+        const end_line = @min(line_range.end_line, line_count - 1);
+
+        const range_start = self.buffer.lineStart(line_range.start_line);
+        const range_end = self.buffer.lineEnd(end_line);
+
+        // Get range content (without trailing \n of last line)
+        const range_content = try self.buffer.getRange(self.allocator, range_start, range_end);
+        defer self.allocator.free(range_content);
+
+        // Check if there's a newline after the range
+        const has_trailing_nl = if (self.buffer.byteAt(range_end)) |b| b == '\n' else false;
+
+        const insert_len: u32 = @intCast(range_content.len + 1);
+        const insert_text = try self.allocator.alloc(u8, insert_len);
+        defer self.allocator.free(insert_text);
+
+        const insert_pos: u32 = if (has_trailing_nl) range_end + 1 else range_end;
+
+        if (has_trailing_nl) {
+            // Insert "content\n" after the trailing newline
+            @memcpy(insert_text[0..range_content.len], range_content);
+            insert_text[range_content.len] = '\n';
+        } else {
+            // Last line of document: insert "\ncontent"
+            insert_text[0] = '\n';
+            @memcpy(insert_text[1..], range_content);
+        }
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        try self.undo_stack.record(.insert, insert_pos, insert_text);
+        try self.buffer.insert(insert_pos, insert_text);
+        try self.undo_stack.commit();
+
+        self.modified = true;
+        self.edit_counter +%= 1;
+
+        const line_delta = end_line - line_range.start_line + 1;
+        self.cursor.moveTo(self.cursor.line + line_delta, self.cursor.col);
+        if (self.selection.active) {
+            self.selection.anchor_line += line_delta;
+        }
+        self.ensureCursorVisible();
+    }
+
+    pub fn moveLineUp(self: *Editor) !void {
+        const line_range = self.selectedLineRange();
+        if (line_range.start_line == 0) return;
+
+        const above = line_range.start_line - 1;
+        const above_start = self.buffer.lineStart(above);
+        const above_end = self.buffer.lineEnd(above);
+        // above line always has a trailing \n (since a line follows it)
+        const delete_end = above_end + 1;
+        const del_len = delete_end - above_start;
+
+        const above_content = try self.buffer.getRange(self.allocator, above_start, above_end);
+        defer self.allocator.free(above_content);
+
+        const deleted_text = try self.buffer.getRange(self.allocator, above_start, delete_end);
+        defer self.allocator.free(deleted_text);
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+
+        // Step 1: Delete the above line (including its trailing \n)
+        try self.undo_stack.record(.delete, above_start, deleted_text);
+        try self.buffer.delete(above_start, del_len);
+
+        // After deletion, our range shifted up by 1. Insert "\nabove_content" at end of our range.
+        const new_end_line = line_range.end_line - 1;
+        const insert_pos = self.buffer.lineEnd(new_end_line);
+
+        const insert_text = try self.allocator.alloc(u8, above_content.len + 1);
+        defer self.allocator.free(insert_text);
+        insert_text[0] = '\n';
+        @memcpy(insert_text[1..], above_content);
+
+        try self.undo_stack.record(.insert, insert_pos, insert_text);
+        try self.buffer.insert(insert_pos, insert_text);
+        try self.undo_stack.commit();
+
+        self.modified = true;
+        self.edit_counter +%= 1;
+        self.cursor.moveTo(self.cursor.line - 1, self.cursor.col);
+        if (self.selection.active) {
+            self.selection.anchor_line -= 1;
+        }
+        self.ensureCursorVisible();
+    }
+
+    pub fn moveLineDown(self: *Editor) !void {
+        const line_range = self.selectedLineRange();
+        const line_count = self.buffer.lineCount();
+        if (line_range.end_line + 1 >= line_count) return;
+
+        const below = line_range.end_line + 1;
+        const del_start = self.buffer.lineEnd(line_range.end_line);
+        const del_end = self.buffer.lineEnd(below);
+        const del_len = del_end - del_start;
+
+        // Get below line content (without its preceding \n)
+        const below_start = self.buffer.lineStart(below);
+        const below_content = try self.buffer.getRange(self.allocator, below_start, del_end);
+        defer self.allocator.free(below_content);
+
+        // Full deleted text for undo: "\nbelow_content"
+        const deleted_text = try self.buffer.getRange(self.allocator, del_start, del_end);
+        defer self.allocator.free(deleted_text);
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+
+        // Step 1: Delete "\nbelow_content"
+        try self.undo_stack.record(.delete, del_start, deleted_text);
+        try self.buffer.delete(del_start, del_len);
+
+        // Step 2: Insert "below_content\n" at the start of our range
+        const insert_pos = self.buffer.lineStart(line_range.start_line);
+        const insert_text = try self.allocator.alloc(u8, below_content.len + 1);
+        defer self.allocator.free(insert_text);
+        @memcpy(insert_text[0..below_content.len], below_content);
+        insert_text[below_content.len] = '\n';
+
+        try self.undo_stack.record(.insert, insert_pos, insert_text);
+        try self.buffer.insert(insert_pos, insert_text);
+        try self.undo_stack.commit();
+
+        self.modified = true;
+        self.edit_counter +%= 1;
+        self.cursor.moveTo(self.cursor.line + 1, self.cursor.col);
+        if (self.selection.active) {
+            self.selection.anchor_line += 1;
+        }
+        self.ensureCursorVisible();
+    }
+
     // ── Movement ───────────────────────────────────────────────
 
     pub fn moveLeft(self: *Editor) void {
@@ -572,6 +876,20 @@ pub const Editor = struct {
         const last_line = self.buffer.lineCount() -| 1;
         const line_len = self.buffer.lineEnd(last_line) - self.buffer.lineStart(last_line);
         self.cursor.moveTo(last_line, line_len);
+    }
+
+    pub fn selectStart(self: *Editor) void {
+        self.startSelectionIfNeeded();
+        self.cursor.moveTo(0, 0);
+        self.ensureCursorVisible();
+    }
+
+    pub fn selectEnd(self: *Editor) void {
+        self.startSelectionIfNeeded();
+        const last_line = self.buffer.lineCount() -| 1;
+        const line_len = self.buffer.lineEnd(last_line) - self.buffer.lineStart(last_line);
+        self.cursor.moveTo(last_line, line_len);
+        self.ensureCursorVisible();
     }
 
     pub fn selectWordLeft(self: *Editor) void {
@@ -902,93 +1220,128 @@ pub const Editor = struct {
     // ── Find & Replace ──────────────────────────────────────────
 
     pub fn findNext(self: *Editor, query: []const u8) bool {
+        return self.findNextWithOptions(query, .{});
+    }
+
+    pub fn findNextWithOptions(self: *Editor, query: []const u8, options: FindOptions) bool {
         if (query.len == 0) return false;
         const total = self.buffer.totalLength();
         if (total == 0) return false;
+        const qlen: u32 = @intCast(query.len);
+        if (qlen > total) return false;
 
-        // Start searching from after current selection/cursor
+        const content = self.buffer.getContent(self.allocator) catch return false;
+        defer self.allocator.free(content);
+
         const cursor_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
-        var search_pos = cursor_pos;
 
-        // Search forward from cursor, wrapping around
-        var checked: u32 = 0;
-        while (checked < total) {
-            if (search_pos >= total) search_pos = 0;
-            const b = self.buffer.byteAt(search_pos) orelse break;
-            if (b == query[0]) {
-                if (self.matchAt(search_pos, query)) {
-                    const start_lc = self.buffer.posToLineCol(search_pos);
-                    const end_pos = search_pos + @as(u32, @intCast(query.len));
-                    const end_lc = self.buffer.posToLineCol(end_pos);
-                    self.selection.setAnchor(start_lc.line, start_lc.col);
-                    self.cursor.moveTo(end_lc.line, end_lc.col);
-                    self.ensureCursorVisible();
-                    return true;
-                }
+        // Phase 1: search forward from cursor_pos to end
+        var pos = cursor_pos;
+        while (pos + qlen <= total) : (pos += 1) {
+            if (matchInContent(content, pos, query, options) and
+                (!options.whole_word or isWholeWordInContent(content, pos, pos + qlen, total)))
+            {
+                self.selectMatchPos(pos, qlen);
+                return true;
             }
-            search_pos += 1;
-            checked += 1;
+        }
+        // Phase 2: wrap around from 0 to cursor_pos
+        pos = 0;
+        while (pos < cursor_pos and pos + qlen <= total) : (pos += 1) {
+            if (matchInContent(content, pos, query, options) and
+                (!options.whole_word or isWholeWordInContent(content, pos, pos + qlen, total)))
+            {
+                self.selectMatchPos(pos, qlen);
+                return true;
+            }
         }
         return false;
     }
 
     pub fn findPrev(self: *Editor, query: []const u8) bool {
+        return self.findPrevWithOptions(query, .{});
+    }
+
+    pub fn findPrevWithOptions(self: *Editor, query: []const u8, options: FindOptions) bool {
         if (query.len == 0) return false;
         const total = self.buffer.totalLength();
         if (total == 0) return false;
+        const qlen: u32 = @intCast(query.len);
+        if (qlen > total) return false;
 
-        const cursor_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
-        // Start from before selection start if active
-        var start: i64 = undefined;
+        const content = self.buffer.getContent(self.allocator) catch return false;
+        defer self.allocator.free(content);
+
+        const max_start: u32 = total - qlen;
+
+        // Determine search start position
+        var search_start: u32 = undefined;
         if (self.selection.active) {
             const r = self.selection.orderedRange(self.cursor.line, self.cursor.col);
-            start = @as(i64, self.buffer.lineColToPos(r.start_line, r.start_col)) - 1;
+            const sel_start = self.buffer.lineColToPos(r.start_line, r.start_col);
+            search_start = if (sel_start > 0) @min(sel_start - 1, max_start) else max_start;
         } else {
-            start = @as(i64, cursor_pos) - 1;
+            const cursor_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+            search_start = if (cursor_pos > 0) @min(cursor_pos - 1, max_start) else max_start;
         }
-        if (start < 0) start = @as(i64, total) - 1;
 
-        var checked: u32 = 0;
-        while (checked < total) {
-            if (start < 0) start = @as(i64, total) - 1;
-            const pos: u32 = @intCast(start);
-            const b = self.buffer.byteAt(pos) orelse break;
-            if (b == query[0]) {
-                if (self.matchAt(pos, query)) {
-                    const start_lc = self.buffer.posToLineCol(pos);
-                    const end_pos = pos + @as(u32, @intCast(query.len));
-                    const end_lc = self.buffer.posToLineCol(end_pos);
-                    self.selection.setAnchor(start_lc.line, start_lc.col);
-                    self.cursor.moveTo(end_lc.line, end_lc.col);
-                    self.ensureCursorVisible();
+        // Phase 1: search backward from search_start to 0
+        var pos_signed: i64 = @intCast(search_start);
+        while (pos_signed >= 0) : (pos_signed -= 1) {
+            const p: u32 = @intCast(pos_signed);
+            if (matchInContent(content, p, query, options) and
+                (!options.whole_word or isWholeWordInContent(content, p, p + qlen, total)))
+            {
+                self.selectMatchPos(p, qlen);
+                return true;
+            }
+        }
+        // Phase 2: wrap around from max_start down to search_start + 1
+        if (search_start < max_start) {
+            pos_signed = @intCast(max_start);
+            while (pos_signed > @as(i64, search_start)) : (pos_signed -= 1) {
+                const p: u32 = @intCast(pos_signed);
+                if (matchInContent(content, p, query, options) and
+                    (!options.whole_word or isWholeWordInContent(content, p, p + qlen, total)))
+                {
+                    self.selectMatchPos(p, qlen);
                     return true;
                 }
             }
-            start -= 1;
-            checked += 1;
         }
         return false;
     }
 
     pub fn replaceNext(self: *Editor, query: []const u8, replacement: []const u8) !bool {
-        // If current selection matches query, replace it, then find next
+        return self.replaceNextWithOptions(query, replacement, .{});
+    }
+
+    pub fn replaceNextWithOptions(self: *Editor, query: []const u8, replacement: []const u8, options: FindOptions) !bool {
         if (self.selection.active) {
+            const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+            const start_pos = self.buffer.lineColToPos(range.start_line, range.start_col);
+            const end_pos = self.buffer.lineColToPos(range.end_line, range.end_col);
             const sel_text = self.getSelectionText();
             if (sel_text) |text| {
                 defer self.allocator.free(text);
-                if (std.mem.eql(u8, text, query)) {
+                if (bytesEqual(text, query, options.case_sensitive) and
+                    (!options.whole_word or self.isWholeWordMatch(start_pos, end_pos)))
+                {
                     try self.deleteSelection();
                     try self.insertText(replacement);
-                    _ = self.findNext(query);
+                    _ = self.findNextWithOptions(query, options);
                     return true;
                 }
             }
         }
-        // Otherwise just find next
-        return self.findNext(query);
+        return self.findNextWithOptions(query, options);
     }
 
     pub fn replaceAll(self: *Editor, query: []const u8, replacement: []const u8) !u32 {
+        return self.replaceAllWithOptions(query, replacement, .{});
+    }
+
+    pub fn replaceAllWithOptions(self: *Editor, query: []const u8, replacement: []const u8, options: FindOptions) !u32 {
         if (query.len == 0) return 0;
         var count: u32 = 0;
 
@@ -997,7 +1350,7 @@ pub const Editor = struct {
 
         var search_pos: u32 = 0;
         while (search_pos + @as(u32, @intCast(query.len)) <= self.buffer.totalLength()) {
-            if (self.matchAt(search_pos, query)) {
+            if (self.matchAt(search_pos, query, options)) {
                 const start_lc = self.buffer.posToLineCol(search_pos);
                 const end_lc = self.buffer.posToLineCol(search_pos + @as(u32, @intCast(query.len)));
                 self.selection.setAnchor(start_lc.line, start_lc.col);
@@ -1013,14 +1366,15 @@ pub const Editor = struct {
         return count;
     }
 
-    fn matchAt(self: *const Editor, pos: u32, query: []const u8) bool {
+    fn matchAt(self: *const Editor, pos: u32, query: []const u8, options: FindOptions) bool {
         const total = self.buffer.totalLength();
         if (pos + @as(u32, @intCast(query.len)) > total) return false;
         for (query, 0..) |qch, i| {
             const b = self.buffer.byteAt(pos + @as(u32, @intCast(i))) orelse return false;
-            if (b != qch) return false;
+            if (!byteEqual(b, qch, options.case_sensitive)) return false;
         }
-        return true;
+        if (!options.whole_word) return true;
+        return self.isWholeWordMatch(pos, pos + @as(u32, @intCast(query.len)));
     }
 
     // ── Render ─────────────────────────────────────────────────
@@ -1185,6 +1539,197 @@ pub const Editor = struct {
         return .{ .line = lo, .col_offset = segment * self.wrapCol() };
     }
 
+    const LineRange = struct {
+        start_line: u32,
+        end_line: u32,
+    };
+
+    fn selectedLineRange(self: *const Editor) LineRange {
+        if (!self.selection.active) {
+            return .{ .start_line = self.cursor.line, .end_line = self.cursor.line };
+        }
+
+        const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+        return .{ .start_line = range.start_line, .end_line = range.end_line };
+    }
+
+    fn handleAutoPair(self: *Editor, text: []const u8) !bool {
+        if (text.len != 1) return false;
+
+        const ch = text[0];
+        const cursor_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        const next_byte = self.buffer.byteAt(cursor_pos);
+
+        if (!self.selection.active and next_byte == ch and isAutoPairSkippable(ch)) {
+            self.moveCursorRight();
+            return true;
+        }
+
+        const closing = autoPairClosing(ch) orelse return false;
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+
+        if (self.selection.active) {
+            const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+            const start_pos = self.buffer.lineColToPos(range.start_line, range.start_col);
+            const end_pos = self.buffer.lineColToPos(range.end_line, range.end_col);
+            const selected = try self.buffer.getRange(self.allocator, start_pos, end_pos);
+            defer self.allocator.free(selected);
+
+            const wrapped = try self.allocator.alloc(u8, selected.len + 2);
+            defer self.allocator.free(wrapped);
+            wrapped[0] = ch;
+            @memcpy(wrapped[1 .. 1 + selected.len], selected);
+            wrapped[wrapped.len - 1] = closing;
+
+            try self.undo_stack.record(.delete, start_pos, selected);
+            try self.buffer.delete(start_pos, end_pos - start_pos);
+            try self.undo_stack.record(.insert, start_pos, wrapped);
+            try self.buffer.insert(start_pos, wrapped);
+            try self.undo_stack.commit();
+
+            const end_lc = self.buffer.posToLineCol(start_pos + @as(u32, @intCast(wrapped.len)));
+            self.selection.clear();
+            self.cursor.moveTo(end_lc.line, end_lc.col);
+        } else {
+            var pair = [2]u8{ ch, closing };
+            try self.undo_stack.record(.insert, cursor_pos, &pair);
+            try self.buffer.insert(cursor_pos, &pair);
+            try self.undo_stack.commit();
+
+            const lc = self.buffer.posToLineCol(cursor_pos + 1);
+            self.cursor.moveTo(lc.line, lc.col);
+        }
+
+        self.modified = true;
+        self.edit_counter +%= 1;
+        self.ensureCursorVisible();
+        return true;
+    }
+
+    // ── Buffer query helpers ─────────────────────────────────────
+
+    fn lineIndentBytes(self: *const Editor, start: u32, end: u32) u32 {
+        var i: u32 = 0;
+        while (start + i < end) {
+            const b = self.buffer.byteAt(start + i) orelse break;
+            if (b != ' ' and b != '\t') break;
+            i += 1;
+        }
+        return i;
+    }
+
+    fn bufferStartsWith(self: *const Editor, pos: u32, prefix: []const u8) bool {
+        for (prefix, 0..) |ch, i| {
+            const b = self.buffer.byteAt(pos + @as(u32, @intCast(i))) orelse return false;
+            if (b != ch) return false;
+        }
+        return true;
+    }
+
+    // ── Find helpers (content-buffer based) ──────────────────────
+
+    fn selectMatchPos(self: *Editor, pos: u32, qlen: u32) void {
+        const start_lc = self.buffer.posToLineCol(pos);
+        const end_lc = self.buffer.posToLineCol(pos + qlen);
+        self.selection.setAnchor(start_lc.line, start_lc.col);
+        self.cursor.moveTo(end_lc.line, end_lc.col);
+        self.ensureCursorVisible();
+    }
+
+    fn matchInContent(content: []const u8, pos: u32, query: []const u8, options: FindOptions) bool {
+        const p: usize = pos;
+        for (query, 0..) |qch, i| {
+            if (!byteEqual(content[p + i], qch, options.case_sensitive)) return false;
+        }
+        return true;
+    }
+
+    fn isWholeWordInContent(content: []const u8, start: u32, end: u32, total: u32) bool {
+        if (start > 0 and !isWordSeparator(content[start - 1])) return false;
+        if (end < total and !isWordSeparator(content[end])) return false;
+        return true;
+    }
+
+    fn autoPairClosing(ch: u8) ?u8 {
+        return switch (ch) {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            '"' => '"',
+            '\'' => '\'',
+            else => null,
+        };
+    }
+
+    fn isAutoPairSkippable(ch: u8) bool {
+        return switch (ch) {
+            ')', ']', '}', '"', '\'' => true,
+            else => false,
+        };
+    }
+
+    fn wordBoundaryLeft(self: *const Editor, start_pos: u32) u32 {
+        if (start_pos == 0) return 0;
+
+        var pos = self.buffer.prevCodepointStart(start_pos);
+        while (pos > 0) {
+            const b = self.buffer.byteAt(pos) orelse break;
+            if (!isWordSeparator(b)) break;
+            pos = self.buffer.prevCodepointStart(pos);
+        }
+        while (pos > 0) {
+            const prev = self.buffer.prevCodepointStart(pos);
+            const b = self.buffer.byteAt(prev) orelse break;
+            if (isWordSeparator(b)) break;
+            pos = prev;
+        }
+        return pos;
+    }
+
+    fn wordBoundaryRight(self: *const Editor, start_pos: u32) u32 {
+        var pos = start_pos;
+        const total = self.buffer.totalLength();
+        if (pos >= total) return total;
+
+        while (pos < total) {
+            const b = self.buffer.byteAt(pos) orelse break;
+            if (isWordSeparator(b)) break;
+            pos = self.buffer.nextCodepointStart(pos);
+        }
+        while (pos < total) {
+            const b = self.buffer.byteAt(pos) orelse break;
+            if (!isWordSeparator(b)) break;
+            pos = self.buffer.nextCodepointStart(pos);
+        }
+        return pos;
+    }
+
+    fn byteEqual(a: u8, b: u8, case_sensitive: bool) bool {
+        if (case_sensitive) return a == b;
+        return foldAscii(a) == foldAscii(b);
+    }
+
+    fn bytesEqual(a: []const u8, b: []const u8, case_sensitive: bool) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |lhs, rhs| {
+            if (!byteEqual(lhs, rhs, case_sensitive)) return false;
+        }
+        return true;
+    }
+
+    fn foldAscii(ch: u8) u8 {
+        return if (ch < 0x80) std.ascii.toLower(ch) else ch;
+    }
+
+    fn isWholeWordMatch(self: *const Editor, start_pos: u32, end_pos: u32) bool {
+        if (start_pos > 0) {
+            const before = self.buffer.byteAt(start_pos - 1) orelse return false;
+            if (!isWordSeparator(before)) return false;
+        }
+        const after = self.buffer.byteAt(end_pos) orelse return true;
+        return isWordSeparator(after);
+    }
+
     // ── Internal cursor helpers ────────────────────────────────
 
     fn moveCursorLeft(self: *Editor) void {
@@ -1232,59 +1777,31 @@ pub const Editor = struct {
     }
 
     fn moveCursorWordLeft(self: *Editor) void {
-        var pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
-        if (pos == 0) return;
+        const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        const new_pos = self.wordBoundaryLeft(pos);
+        if (new_pos == pos) return;
 
-        // Step back one codepoint
-        pos = self.buffer.prevCodepointStart(pos);
-        // Skip separators
-        while (pos > 0) {
-            const b = self.buffer.byteAt(pos) orelse break;
-            if (!isWordSeparator(b)) break;
-            pos = self.buffer.prevCodepointStart(pos);
-        }
-        // Find start of word
-        while (pos > 0) {
-            const prev = self.buffer.prevCodepointStart(pos);
-            const b = self.buffer.byteAt(prev) orelse break;
-            if (isWordSeparator(b)) break;
-            pos = prev;
-        }
-
-        const lc = self.buffer.posToLineCol(pos);
+        const lc = self.buffer.posToLineCol(new_pos);
         self.cursor.moveTo(lc.line, lc.col);
         self.ensureCursorVisible();
     }
 
     fn moveCursorWordRight(self: *Editor) void {
-        var pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
-        const total = self.buffer.totalLength();
-        if (pos >= total) return;
+        const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        const new_pos = self.wordBoundaryRight(pos);
+        if (new_pos == pos) return;
 
-        // Skip current word characters
-        while (pos < total) {
-            const b = self.buffer.byteAt(pos) orelse break;
-            if (isWordSeparator(b)) break;
-            pos = self.buffer.nextCodepointStart(pos);
-        }
-        // Skip separators
-        while (pos < total) {
-            const b = self.buffer.byteAt(pos) orelse break;
-            if (!isWordSeparator(b)) break;
-            pos = self.buffer.nextCodepointStart(pos);
-        }
-
-        const lc = self.buffer.posToLineCol(pos);
+        const lc = self.buffer.posToLineCol(new_pos);
         self.cursor.moveTo(lc.line, lc.col);
         self.ensureCursorVisible();
     }
 
+    fn isWordByte(ch: u8) bool {
+        return std.ascii.isAlphanumeric(ch) or ch == '_' or ch >= 0x80;
+    }
+
     fn isWordSeparator(ch: u8) bool {
-        return ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r' or
-            ch == '.' or ch == ',' or ch == ';' or ch == ':' or
-            ch == '(' or ch == ')' or ch == '[' or ch == ']' or
-            ch == '{' or ch == '}' or ch == '<' or ch == '>' or
-            ch == '"' or ch == '\'' or ch == '/' or ch == '\\';
+        return !isWordByte(ch);
     }
 
     fn clampCursorCol(self: *Editor) void {
@@ -1338,6 +1855,12 @@ pub const Editor = struct {
 
 // ── Tests ──────────────────────────────────────────────────────
 const testing = std.testing;
+
+fn expectContent(ed: *Editor, expected: []const u8) !void {
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings(expected, content);
+}
 
 test "Editor: basic insert and cursor" {
     const config = Config.defaults();
@@ -1559,4 +2082,162 @@ test "Editor: multi-line tab insert respects tab mode" {
     try testing.expectEqualStrings("\ta\n\tb", content);
     try testing.expectEqual(@as(u32, 1), ed.selection.anchor_col);
     try testing.expectEqual(@as(u32, 2), ed.cursor.col);
+}
+
+test "Editor: auto-pairs delimiters" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("(");
+    try expectContent(&ed, "()");
+    try testing.expectEqual(@as(u32, 1), ed.cursor.col);
+
+    try ed.insertText(")");
+    try expectContent(&ed, "()");
+    try testing.expectEqual(@as(u32, 2), ed.cursor.col);
+}
+
+test "Editor: auto-pair wraps selection" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("word");
+    ed.selectAll();
+    try ed.insertText("(");
+
+    try expectContent(&ed, "(word)");
+    try testing.expect(!ed.selection.active);
+    try testing.expectEqual(@as(u32, 6), ed.cursor.col);
+}
+
+test "Editor: delete word backward and forward" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("foo bar");
+    try ed.deleteWordBackward();
+    try expectContent(&ed, "foo ");
+    try testing.expectEqual(@as(u32, 4), ed.cursor.col);
+
+    ed.moveStart();
+    try ed.deleteWordForward();
+    try expectContent(&ed, "");
+    try testing.expectEqual(@as(u32, 0), ed.cursor.col);
+}
+
+test "Editor: toggleComment adds and removes line comments" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.language = .zig;
+    try ed.insertText("    foo\n    bar");
+    ed.selectAll();
+
+    try ed.toggleComment();
+    try expectContent(&ed, "    // foo\n    // bar");
+    try testing.expectEqual(@as(u32, 10), ed.cursor.col);
+
+    try ed.toggleComment();
+    try expectContent(&ed, "    foo\n    bar");
+    try testing.expectEqual(@as(u32, 7), ed.cursor.col);
+}
+
+test "Editor: duplicateLine duplicates current line" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\nb");
+    ed.moveStart();
+
+    try ed.duplicateLine();
+    try expectContent(&ed, "a\na\nb");
+    try testing.expectEqual(@as(u32, 1), ed.cursor.line);
+    try testing.expectEqual(@as(u32, 0), ed.cursor.col);
+}
+
+test "Editor: duplicateLine duplicates selected block" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\nb");
+    ed.selectAll();
+
+    try ed.duplicateLine();
+    try expectContent(&ed, "a\nb\na\nb");
+    try testing.expect(ed.selection.active);
+    try testing.expectEqual(@as(u32, 2), ed.selection.anchor_line);
+    try testing.expectEqual(@as(u32, 3), ed.cursor.line);
+}
+
+test "Editor: moveLineDown moves current line" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\nb\nc");
+    ed.moveStart();
+    ed.moveDown();
+
+    try ed.moveLineDown();
+    try expectContent(&ed, "a\nc\nb");
+    try testing.expectEqual(@as(u32, 2), ed.cursor.line);
+}
+
+test "Editor: moveLineUp moves selected block" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\nb\nc\nd");
+    ed.selection.setAnchor(1, 0);
+    ed.cursor.moveTo(2, 1);
+
+    try ed.moveLineUp();
+    try expectContent(&ed, "b\nc\na\nd");
+    try testing.expectEqual(@as(u32, 0), ed.selection.anchor_line);
+    try testing.expectEqual(@as(u32, 1), ed.cursor.line);
+}
+
+test "Editor: findNextWithOptions is case-insensitive" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("Hello hELLo");
+    ed.moveStart();
+
+    try testing.expect(ed.findNextWithOptions("hello", .{ .case_sensitive = false }));
+    {
+        const sel = ed.getSelectionText().?;
+        defer ed.allocator.free(sel);
+        try testing.expectEqualStrings("Hello", sel);
+    }
+
+    try testing.expect(ed.findNextWithOptions("hello", .{ .case_sensitive = false }));
+    {
+        const sel = ed.getSelectionText().?;
+        defer ed.allocator.free(sel);
+        try testing.expectEqualStrings("hELLo", sel);
+    }
+}
+
+test "Editor: replaceAllWithOptions respects whole-word matching" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("cat scatter Cat");
+    const replaced = try ed.replaceAllWithOptions("cat", "dog", .{
+        .case_sensitive = false,
+        .whole_word = true,
+    });
+
+    try testing.expectEqual(@as(u32, 2), replaced);
+    try expectContent(&ed, "dog scatter dog");
 }

@@ -23,7 +23,7 @@ class MetalEditorView: MTKView, MTKViewDelegate {
 
         if let cfFamily = matcha_config_get_string(editor.handle, "font-family") {
             let family = String(cString: cfFamily)
-            matcha_editor_free_string(UnsafeMutablePointer(mutating: cfFamily))
+            matcha_free_string(UnsafeMutablePointer(mutating: cfFamily))
             self.font = NSFont(name: family, size: size) ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
         } else {
             self.font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
@@ -168,6 +168,12 @@ class MetalEditorView: MTKView, MTKViewDelegate {
                     NotificationCenter.default.post(name: .matchaFindNext, object: editor)
                 }
                 return
+            case "/":
+                editor.toggleComment()
+                return
+            case "d":
+                editor.duplicateLine()
+                return
             default: break
             }
         }
@@ -184,15 +190,21 @@ class MetalEditorView: MTKView, MTKViewDelegate {
             else { hasShift ? editor.selectRight() : editor.moveRight() }
             return
         case 125: // Down
-            if hasCmd { hasShift ? editor.selectLineEnd() : editor.moveEnd() }
+            if hasCmd && hasAlt { editor.moveLineDown() }
+            else if hasCmd { hasShift ? editor.selectEnd() : editor.moveEnd() }
             else { hasShift ? editor.selectDown() : editor.moveDown() }
             return
         case 126: // Up
-            if hasCmd { hasShift ? editor.selectLineStart() : editor.moveStart() }
+            if hasCmd && hasAlt { editor.moveLineUp() }
+            else if hasCmd { hasShift ? editor.selectStart() : editor.moveStart() }
             else { hasShift ? editor.selectUp() : editor.moveUp() }
             return
-        case 51: editor.deleteBackward(); return
-        case 117: editor.deleteForward(); return
+        case 51:
+            if hasAlt { editor.deleteWordBackward() } else { editor.deleteBackward() }
+            return
+        case 117:
+            if hasAlt { editor.deleteWordForward() } else { editor.deleteForward() }
+            return
         case 36: editor.newline(); return
         case 48:
             if hasShift { editor.dedent() } else { editor.insertTab() }

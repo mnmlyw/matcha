@@ -131,10 +131,10 @@ export fn matcha_editor_save_as(ed: ?*Editor, path: ?[*:0]const u8) bool {
 
 // ── Error feedback ─────────────────────────────────────────────
 
-export fn matcha_editor_get_last_error(ed: ?*Editor) ?[*]const u8 {
+export fn matcha_editor_get_last_error(ed: ?*Editor) ?[*:0]const u8 {
     const e = ed orelse return null;
     if (!e.has_error) return null;
-    return &e.error_msg;
+    return @ptrCast(&e.error_msg);
 }
 
 export fn matcha_editor_clear_error(ed: ?*Editor) void {
@@ -165,9 +165,51 @@ export fn matcha_editor_delete_forward(ed: ?*Editor) void {
     };
 }
 
+export fn matcha_editor_delete_word_backward(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.deleteWordBackward() catch |err| {
+        e.setLastError(err);
+    };
+}
+
+export fn matcha_editor_delete_word_forward(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.deleteWordForward() catch |err| {
+        e.setLastError(err);
+    };
+}
+
 export fn matcha_editor_newline(ed: ?*Editor) void {
     const e = ed orelse return;
     e.newline() catch |err| {
+        e.setLastError(err);
+    };
+}
+
+export fn matcha_editor_toggle_comment(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.toggleComment() catch |err| {
+        e.setLastError(err);
+    };
+}
+
+export fn matcha_editor_duplicate_line(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.duplicateLine() catch |err| {
+        e.setLastError(err);
+    };
+}
+
+export fn matcha_editor_move_line_up(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.moveLineUp() catch |err| {
+        e.setLastError(err);
+    };
+}
+
+export fn matcha_editor_move_line_down(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.moveLineDown() catch |err| {
         e.setLastError(err);
     };
 }
@@ -268,6 +310,14 @@ export fn matcha_editor_select_all(ed: ?*Editor) void {
     if (ed) |e| e.selectAll();
 }
 
+export fn matcha_editor_select_start(ed: ?*Editor) void {
+    if (ed) |e| e.selectStart();
+}
+
+export fn matcha_editor_select_end(ed: ?*Editor) void {
+    if (ed) |e| e.selectEnd();
+}
+
 export fn matcha_editor_select_word_left(ed: ?*Editor) void {
     if (ed) |e| e.selectWordLeft();
 }
@@ -300,6 +350,13 @@ export fn matcha_editor_free_string(str: ?[*:0]u8) void {
     if (str) |s| {
         const slice = std.mem.span(s);
         c_allocator.free(slice[0 .. slice.len + 1]); // +1 for sentinel
+    }
+}
+
+export fn matcha_free_string(str: ?[*:0]u8) void {
+    if (str) |s| {
+        const slice = std.mem.span(s);
+        c_allocator.free(slice[0 .. slice.len + 1]);
     }
 }
 
@@ -347,6 +404,18 @@ export fn matcha_editor_find_prev(ed: ?*Editor, query: ?[*]const u8, len: u32) b
     return e.findPrev(q[0..len]);
 }
 
+export fn matcha_editor_find_next_with_options(ed: ?*Editor, query: ?[*]const u8, len: u32, case_sensitive: bool, whole_word: bool) bool {
+    const e = ed orelse return false;
+    const q = query orelse return false;
+    return e.findNextWithOptions(q[0..len], .{ .case_sensitive = case_sensitive, .whole_word = whole_word });
+}
+
+export fn matcha_editor_find_prev_with_options(ed: ?*Editor, query: ?[*]const u8, len: u32, case_sensitive: bool, whole_word: bool) bool {
+    const e = ed orelse return false;
+    const q = query orelse return false;
+    return e.findPrevWithOptions(q[0..len], .{ .case_sensitive = case_sensitive, .whole_word = whole_word });
+}
+
 export fn matcha_editor_replace_next(ed: ?*Editor, query: ?[*]const u8, q_len: u32, replacement: ?[*]const u8, r_len: u32) bool {
     const e = ed orelse return false;
     const q = query orelse return false;
@@ -357,11 +426,37 @@ export fn matcha_editor_replace_next(ed: ?*Editor, query: ?[*]const u8, q_len: u
     };
 }
 
+export fn matcha_editor_replace_next_with_options(ed: ?*Editor, query: ?[*]const u8, q_len: u32, replacement: ?[*]const u8, r_len: u32, case_sensitive: bool, whole_word: bool) bool {
+    const e = ed orelse return false;
+    const q = query orelse return false;
+    const r = replacement orelse return false;
+    return e.replaceNextWithOptions(q[0..q_len], r[0..r_len], .{
+        .case_sensitive = case_sensitive,
+        .whole_word = whole_word,
+    }) catch |err| {
+        e.setLastError(err);
+        return false;
+    };
+}
+
 export fn matcha_editor_replace_all(ed: ?*Editor, query: ?[*]const u8, q_len: u32, replacement: ?[*]const u8, r_len: u32) u32 {
     const e = ed orelse return 0;
     const q = query orelse return 0;
     const r = replacement orelse return 0;
     return e.replaceAll(q[0..q_len], r[0..r_len]) catch |err| {
+        e.setLastError(err);
+        return 0;
+    };
+}
+
+export fn matcha_editor_replace_all_with_options(ed: ?*Editor, query: ?[*]const u8, q_len: u32, replacement: ?[*]const u8, r_len: u32, case_sensitive: bool, whole_word: bool) u32 {
+    const e = ed orelse return 0;
+    const q = query orelse return 0;
+    const r = replacement orelse return 0;
+    return e.replaceAllWithOptions(q[0..q_len], r[0..r_len], .{
+        .case_sensitive = case_sensitive,
+        .whole_word = whole_word,
+    }) catch |err| {
         e.setLastError(err);
         return 0;
     };
@@ -481,9 +576,6 @@ export fn matcha_editor_get_info(ed: ?*Editor) EditorInfo {
         .cursor_col = e.cursor.col + 1,
         .total_lines = e.buffer.lineCount(),
         .modified = e.modified,
-        .filename = if (e.filename) |f| blk: {
-            const z = c_allocator.dupeZ(u8, f) catch break :blk null;
-            break :blk z.ptr;
-        } else null,
+        .filename = if (e.filename_z) |z| z.ptr else null,
     };
 }

@@ -137,8 +137,6 @@ pub const PieceTable = struct {
         if (len == 0) return;
 
         var remaining = len;
-        const current_pos = pos;
-        _ = current_pos;
 
         while (remaining > 0) {
             var offset: u32 = 0;

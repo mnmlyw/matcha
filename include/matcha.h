@@ -54,7 +54,7 @@ typedef struct {
     uint32_t cursor_col;    // 1-based
     uint32_t total_lines;
     bool modified;
-    const char* filename;   // null if untitled
+    const char* filename;   // null if untitled; borrowed pointer, valid until next editor mutation
 } matcha_editor_info_s;
 
 // ── Lifecycle ──────────────────────────────────────────────────
@@ -79,7 +79,7 @@ bool matcha_editor_open_file(matcha_editor_t ed, const char* path);
 bool matcha_editor_save(matcha_editor_t ed);
 bool matcha_editor_save_as(matcha_editor_t ed, const char* path);
 
-// Error feedback
+// Error feedback (returns borrowed pointer to internal buffer)
 const char* matcha_editor_get_last_error(matcha_editor_t ed);
 void matcha_editor_clear_error(matcha_editor_t ed);
 
@@ -87,7 +87,13 @@ void matcha_editor_clear_error(matcha_editor_t ed);
 void matcha_editor_insert(matcha_editor_t ed, const char* text, uint32_t len);
 void matcha_editor_delete_backward(matcha_editor_t ed);
 void matcha_editor_delete_forward(matcha_editor_t ed);
+void matcha_editor_delete_word_backward(matcha_editor_t ed);
+void matcha_editor_delete_word_forward(matcha_editor_t ed);
 void matcha_editor_newline(matcha_editor_t ed);
+void matcha_editor_toggle_comment(matcha_editor_t ed);
+void matcha_editor_duplicate_line(matcha_editor_t ed);
+void matcha_editor_move_line_up(matcha_editor_t ed);
+void matcha_editor_move_line_down(matcha_editor_t ed);
 
 // Tab / Indent
 void matcha_editor_insert_tab(matcha_editor_t ed);
@@ -115,11 +121,13 @@ void matcha_editor_select_down(matcha_editor_t ed);
 void matcha_editor_select_line_start(matcha_editor_t ed);
 void matcha_editor_select_line_end(matcha_editor_t ed);
 void matcha_editor_select_all(matcha_editor_t ed);
+void matcha_editor_select_start(matcha_editor_t ed);
+void matcha_editor_select_end(matcha_editor_t ed);
 void matcha_editor_select_word_left(matcha_editor_t ed);
 void matcha_editor_select_word_right(matcha_editor_t ed);
 
 // Clipboard
-/// Returns a malloc'd string the caller must free, or NULL if no selection.
+/// Returns a malloc'd string the caller must free with matcha_free_string, or NULL if no selection.
 char* matcha_editor_get_selection_text(matcha_editor_t ed);
 void matcha_editor_paste(matcha_editor_t ed, const char* text, uint32_t len);
 
@@ -143,10 +151,20 @@ float matcha_editor_get_scroll_y(matcha_editor_t ed);
 // Find & Replace
 bool matcha_editor_find_next(matcha_editor_t ed, const char* query, uint32_t len);
 bool matcha_editor_find_prev(matcha_editor_t ed, const char* query, uint32_t len);
+bool matcha_editor_find_next_with_options(matcha_editor_t ed, const char* query, uint32_t len,
+                                           bool case_sensitive, bool whole_word);
+bool matcha_editor_find_prev_with_options(matcha_editor_t ed, const char* query, uint32_t len,
+                                           bool case_sensitive, bool whole_word);
 bool matcha_editor_replace_next(matcha_editor_t ed, const char* query, uint32_t q_len,
                                  const char* replacement, uint32_t r_len);
+bool matcha_editor_replace_next_with_options(matcha_editor_t ed, const char* query, uint32_t q_len,
+                                              const char* replacement, uint32_t r_len,
+                                              bool case_sensitive, bool whole_word);
 uint32_t matcha_editor_replace_all(matcha_editor_t ed, const char* query, uint32_t q_len,
                                     const char* replacement, uint32_t r_len);
+uint32_t matcha_editor_replace_all_with_options(matcha_editor_t ed, const char* query, uint32_t q_len,
+                                                 const char* replacement, uint32_t r_len,
+                                                 bool case_sensitive, bool whole_word);
 
 // Bracket highlights
 const matcha_render_rect_s* matcha_editor_get_bracket_highlights(matcha_editor_t ed, uint32_t* count);
@@ -166,7 +184,10 @@ void matcha_editor_atlas_clear_dirty(matcha_editor_t ed);
 
 // Info
 matcha_editor_info_s matcha_editor_get_info(matcha_editor_t ed);
-void matcha_editor_free_string(char* str);
+
+// Memory management
+void matcha_editor_free_string(char* str);   // free strings from matcha_editor_get_selection_text
+void matcha_free_string(char* str);          // generic string free (also works for config strings)
 
 #ifdef __cplusplus
 }

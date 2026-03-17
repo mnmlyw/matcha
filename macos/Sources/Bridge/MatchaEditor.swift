@@ -103,6 +103,18 @@ class MatchaEditor: ObservableObject {
         updateInfo()
     }
 
+    func deleteWordBackward() {
+        guard let h = handle else { return }
+        matcha_editor_delete_word_backward(h)
+        updateInfo()
+    }
+
+    func deleteWordForward() {
+        guard let h = handle else { return }
+        matcha_editor_delete_word_forward(h)
+        updateInfo()
+    }
+
     func newline() {
         guard let h = handle else { return }
         matcha_editor_newline(h)
@@ -118,6 +130,30 @@ class MatchaEditor: ObservableObject {
     func dedent() {
         guard let h = handle else { return }
         matcha_editor_dedent(h)
+        updateInfo()
+    }
+
+    func toggleComment() {
+        guard let h = handle else { return }
+        matcha_editor_toggle_comment(h)
+        updateInfo()
+    }
+
+    func duplicateLine() {
+        guard let h = handle else { return }
+        matcha_editor_duplicate_line(h)
+        updateInfo()
+    }
+
+    func moveLineUp() {
+        guard let h = handle else { return }
+        matcha_editor_move_line_up(h)
+        updateInfo()
+    }
+
+    func moveLineDown() {
+        guard let h = handle else { return }
+        matcha_editor_move_line_down(h)
         updateInfo()
     }
 
@@ -145,6 +181,8 @@ class MatchaEditor: ObservableObject {
     func selectLineStart() { guard let h = handle else { return }; matcha_editor_select_line_start(h); updateInfo() }
     func selectLineEnd() { guard let h = handle else { return }; matcha_editor_select_line_end(h); updateInfo() }
     func selectAll() { guard let h = handle else { return }; matcha_editor_select_all(h); updateInfo() }
+    func selectStart() { guard let h = handle else { return }; matcha_editor_select_start(h); updateInfo() }
+    func selectEnd() { guard let h = handle else { return }; matcha_editor_select_end(h); updateInfo() }
     func selectWordLeft() { guard let h = handle else { return }; matcha_editor_select_word_left(h); updateInfo() }
     func selectWordRight() { guard let h = handle else { return }; matcha_editor_select_word_right(h); updateInfo() }
 
@@ -208,42 +246,56 @@ class MatchaEditor: ObservableObject {
 
     // MARK: - Find & Replace
 
-    func findNext(query: String) -> Bool {
+    func findNext(query: String, caseSensitive: Bool = true, wholeWord: Bool = false) -> Bool {
         guard let h = handle else { return false }
         return query.withCString { ptr in
-            let result = matcha_editor_find_next(h, ptr, UInt32(query.utf8.count))
+            let result = matcha_editor_find_next_with_options(h, ptr, UInt32(query.utf8.count),
+                                                              caseSensitive, wholeWord)
             updateInfo()
             return result
         }
     }
 
-    func findPrev(query: String) -> Bool {
+    func findPrev(query: String, caseSensitive: Bool = true, wholeWord: Bool = false) -> Bool {
         guard let h = handle else { return false }
         return query.withCString { ptr in
-            let result = matcha_editor_find_prev(h, ptr, UInt32(query.utf8.count))
+            let result = matcha_editor_find_prev_with_options(h, ptr, UInt32(query.utf8.count),
+                                                              caseSensitive, wholeWord)
             updateInfo()
             return result
         }
     }
 
-    func replaceNext(query: String, replacement: String) -> Bool {
+    func replaceNext(query: String, replacement: String,
+                     caseSensitive: Bool = true, wholeWord: Bool = false) -> Bool
+    {
         guard let h = handle else { return false }
         return query.withCString { qPtr in
             replacement.withCString { rPtr in
-                let result = matcha_editor_replace_next(h, qPtr, UInt32(query.utf8.count),
-                                                        rPtr, UInt32(replacement.utf8.count))
+                let result = matcha_editor_replace_next_with_options(
+                    h,
+                    qPtr, UInt32(query.utf8.count),
+                    rPtr, UInt32(replacement.utf8.count),
+                    caseSensitive, wholeWord
+                )
                 updateInfo()
                 return result
             }
         }
     }
 
-    func replaceAll(query: String, replacement: String) -> UInt32 {
+    func replaceAll(query: String, replacement: String,
+                    caseSensitive: Bool = true, wholeWord: Bool = false) -> UInt32
+    {
         guard let h = handle else { return 0 }
         return query.withCString { qPtr in
             replacement.withCString { rPtr in
-                let result = matcha_editor_replace_all(h, qPtr, UInt32(query.utf8.count),
-                                                       rPtr, UInt32(replacement.utf8.count))
+                let result = matcha_editor_replace_all_with_options(
+                    h,
+                    qPtr, UInt32(query.utf8.count),
+                    rPtr, UInt32(replacement.utf8.count),
+                    caseSensitive, wholeWord
+                )
                 updateInfo()
                 return result
             }
@@ -307,11 +359,8 @@ class MatchaEditor: ObservableObject {
     func updateInfo() {
         guard let h = handle else { return }
         let cInfo = matcha_editor_get_info(h)
-        var fname: String? = nil
-        if let f = cInfo.filename {
-            fname = String(cString: f)
-            matcha_editor_free_string(UnsafeMutablePointer(mutating: f))
-        }
+        // filename is a borrowed pointer (valid until next editor mutation), no need to free
+        let fname: String? = cInfo.filename.map { String(cString: $0) }
         let error = getLastError()
         DispatchQueue.main.async { [weak self] in
             self?.info = EditorInfo(

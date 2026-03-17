@@ -47,11 +47,37 @@ struct MatchaApp: App {
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
             }
+
+            CommandMenu("Editor") {
+                Button("Toggle Comment") {
+                    MatchaEditor.activeEditor?.toggleComment()
+                }
+                .keyboardShortcut("/", modifiers: .command)
+
+                Button("Duplicate Line") {
+                    MatchaEditor.activeEditor?.duplicateLine()
+                }
+                .keyboardShortcut("d", modifiers: .command)
+
+                Divider()
+
+                Button("Move Line Up") {
+                    MatchaEditor.activeEditor?.moveLineUp()
+                }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+
+                Button("Move Line Down") {
+                    MatchaEditor.activeEditor?.moveLineDown()
+                }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+            }
         }
     }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    static var pendingFilePath: String? = nil
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         matcha_init()
     }
@@ -71,12 +97,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openFileAction() {
-        // Open a new window first, then trigger file open after a brief delay
+        // Show file dialog first, then open the file in a new window
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        AppDelegate.pendingFilePath = url.path
         newWindowAction()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            guard let editor = MatchaEditor.activeEditor else { return }
-            NotificationCenter.default.post(name: .matchaOpenFile, object: editor)
-        }
     }
 }
 
