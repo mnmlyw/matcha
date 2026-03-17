@@ -2362,3 +2362,20 @@ test "Editor: replaceAllWithOptions respects whole-word matching" {
     try testing.expectEqual(@as(u32, 2), replaced);
     try expectContent(&ed, "dog scatter dog");
 }
+
+test "Editor: non-wrapped horizontal scroll uses full line width" {
+    var config = Config.defaults();
+    config.wrap_lines = false;
+    config.line_numbers = false;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(4, 4, 1, 1);
+    try ed.insertText("abcdefghij");
+
+    ed.prepareRender();
+    ed.scroll(100, 0);
+
+    try testing.expectEqual(@as(f32, 6), ed.scroll_x);
+}

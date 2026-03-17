@@ -119,7 +119,8 @@ class MetalRenderer {
         let cells = editor.getCells()
         let cursors = editor.getCursors()
         let selections = editor.getSelections()
-        let lineNumbers = editor.getLineNumbers()
+        let gutterRows = editor.getGutterRows()
+        let lineNumberLabels = editor.getLineNumberLabels()
         let bracketHighlights = editor.getBracketHighlights()
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
@@ -197,8 +198,8 @@ class MetalRenderer {
         // Pass 3: Gutter backgrounds (drawn ON TOP of content to mask any overflow)
         encoder.setRenderPipelineState(bgPipeline)
         var gutterQuads: [QuadVertex] = []
-        for i in 0..<lineNumbers.count {
-            let ln = lineNumbers[i]
+        for i in 0..<gutterRows.count {
+            let ln = gutterRows[i]
             let rgba = colorToRGBA(ln.color)
             appendQuad(&gutterQuads, x: ln.x, y: ln.y, w: ln.w, h: ln.h,
                        r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a,
@@ -211,7 +212,7 @@ class MetalRenderer {
         }
 
         // Pass 4: Line number text (on top of gutter)
-        drawLineNumbers(encoder: encoder, lineNumbers: lineNumbers, viewWidth: viewWidth, viewHeight: viewHeight, editor: editor)
+        drawLineNumbers(encoder: encoder, lineNumbers: lineNumberLabels, viewWidth: viewWidth, viewHeight: viewHeight)
 
         // Pass 5: Cursors
         if cursorVisible {
@@ -238,24 +239,19 @@ class MetalRenderer {
 
     // MARK: - Line Numbers
 
-    private func drawLineNumbers(encoder: MTLRenderCommandEncoder, lineNumbers: UnsafeBufferPointer<matcha_render_rect_s>, viewWidth: Float, viewHeight: Float, editor: MatchaEditor) {
+    private func drawLineNumbers(encoder: MTLRenderCommandEncoder, lineNumbers: UnsafeBufferPointer<matcha_render_line_number_s>, viewWidth: Float, viewHeight: Float) {
         // Render line numbers as text using the text pipeline
         encoder.setRenderPipelineState(textPipeline)
         ensureAtlasTexture()
 
         var textQuads: [QuadVertex] = []
-        let lineNumColor: (r: Float, g: Float, b: Float, a: Float) = (0.424, 0.439, 0.525, 1.0) // gutter text color
-
-        let scrollY = editor.getScrollY()
 
         for i in 0..<lineNumbers.count {
             let ln = lineNumbers[i]
-            // y = line * cell_h - scroll_y, so line = (y + scroll_y) / cell_h
-            let actualLine = Int((ln.y + scrollY) / ln.h) + 1
-
-            let numStr = String(actualLine)
+            let numStr = String(ln.line)
             let gutterW = ln.w
             let rightPad = cellWidth * 0.5
+            let lineNumColor = colorToRGBA(ln.color)
 
             // Render each digit right-aligned in the gutter
             for (charIdx, char) in numStr.enumerated() {
@@ -263,7 +259,7 @@ class MetalRenderer {
                 let uv = ensureGlyph(codepoint: codepoint)
 
                 let ascender = Float(CTFontGetAscent(ctFont)) / scaleFactor
-                let digitX = gutterW - Float(numStr.count - charIdx) * cellWidth - rightPad
+                let digitX = ln.x + gutterW - Float(numStr.count - charIdx) * cellWidth - rightPad
                 let digitY = ln.y + ascender - uv.bearingY
 
                 appendTextQuad(&textQuads,

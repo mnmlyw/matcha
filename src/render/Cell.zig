@@ -30,3 +30,12 @@ pub const RenderRect = extern struct {
     h: f32 = 0,
     color: u32 = 0x00000000,
 };
+
+pub const RenderLineNumber = extern struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+    color: u32 = 0xFFFFFFFF,
+    line: u32 = 1,
+};

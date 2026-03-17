@@ -8,6 +8,7 @@ class MetalEditorView: MTKView, MTKViewDelegate {
     var cursorBlinkTimer: Timer?
     var cursorVisible = true
     var trackingArea: NSTrackingArea?
+    var keyWindowObserver: NSObjectProtocol?
 
     // Font metrics (in points)
     var cellWidth: CGFloat = 8.4
@@ -64,13 +65,34 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         fatalError("init(coder:) not implemented")
     }
 
+    deinit {
+        cursorBlinkTimer?.invalidate()
+        if let observer = keyWindowObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
     override var acceptsFirstResponder: Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.makeFirstResponder(self)
-        editor.markActive()
-        updateViewport()
+        if let observer = keyWindowObserver {
+            NotificationCenter.default.removeObserver(observer)
+            keyWindowObserver = nil
+        }
+
+        if let window {
+            keyWindowObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.editor.markActive()
+            }
+            window.makeFirstResponder(self)
+            editor.markActive()
+            updateViewport()
+        }
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -147,14 +169,15 @@ class MetalEditorView: MTKView, MTKViewDelegate {
 
         let hasCmd = modifiers.contains(.command)
         let hasShift = modifiers.contains(.shift)
-        let hasAlt = modifiers.contains(.option)
 
         if hasCmd {
             switch event.charactersIgnoringModifiers {
             case "z":
                 if hasShift { editor.redo() } else { editor.undo() }
                 return
-            case "a": editor.selectAll(); return
+            case "a":
+                editor.selectAll()
+                return
             case "c": copySelection(); return
             case "x": cutSelection(); return
             case "v": pasteFromClipboard(); return
@@ -178,46 +201,9 @@ class MetalEditorView: MTKView, MTKViewDelegate {
             }
         }
 
-        switch Int(event.keyCode) {
-        case 123: // Left
-            if hasCmd { hasShift ? editor.selectLineStart() : editor.moveLineStart() }
-            else if hasAlt { hasShift ? editor.selectWordLeft() : editor.moveWordLeft() }
-            else { hasShift ? editor.selectLeft() : editor.moveLeft() }
+        if KeyEventHandler.dispatch(event: event, editor: editor) {
+            editor.updateInfo()
             return
-        case 124: // Right
-            if hasCmd { hasShift ? editor.selectLineEnd() : editor.moveLineEnd() }
-            else if hasAlt { hasShift ? editor.selectWordRight() : editor.moveWordRight() }
-            else { hasShift ? editor.selectRight() : editor.moveRight() }
-            return
-        case 125: // Down
-            if hasCmd && hasAlt { editor.moveLineDown() }
-            else if hasCmd { hasShift ? editor.selectEnd() : editor.moveEnd() }
-            else { hasShift ? editor.selectDown() : editor.moveDown() }
-            return
-        case 126: // Up
-            if hasCmd && hasAlt { editor.moveLineUp() }
-            else if hasCmd { hasShift ? editor.selectStart() : editor.moveStart() }
-            else { hasShift ? editor.selectUp() : editor.moveUp() }
-            return
-        case 51:
-            if hasAlt { editor.deleteWordBackward() } else { editor.deleteBackward() }
-            return
-        case 117:
-            if hasAlt { editor.deleteWordForward() } else { editor.deleteForward() }
-            return
-        case 36: editor.newline(); return
-        case 48:
-            if hasShift { editor.dedent() } else { editor.insertTab() }
-            return
-        case 116: editor.movePageUp(); return
-        case 121: editor.movePageDown(); return
-        case 115: editor.moveStart(); return
-        case 119: editor.moveEnd(); return
-        default: break
-        }
-
-        if let chars = event.characters, !chars.isEmpty, !hasCmd {
-            editor.insert(text: chars)
         }
     }
 

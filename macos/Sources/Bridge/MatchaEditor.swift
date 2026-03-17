@@ -336,10 +336,19 @@ class MatchaEditor: ObservableObject {
         return UnsafeBufferPointer(start: ptr, count: Int(count))
     }
 
-    func getLineNumbers() -> UnsafeBufferPointer<matcha_render_rect_s> {
+    func getGutterRows() -> UnsafeBufferPointer<matcha_render_rect_s> {
         guard let h = handle else { return UnsafeBufferPointer(start: nil, count: 0) }
         var count: UInt32 = 0
         guard let ptr = matcha_editor_get_line_number_cells(h, &count) else {
+            return UnsafeBufferPointer(start: nil, count: 0)
+        }
+        return UnsafeBufferPointer(start: ptr, count: Int(count))
+    }
+
+    func getLineNumberLabels() -> UnsafeBufferPointer<matcha_render_line_number_s> {
+        guard let h = handle else { return UnsafeBufferPointer(start: nil, count: 0) }
+        var count: UInt32 = 0
+        guard let ptr = matcha_editor_get_line_number_labels(h, &count) else {
             return UnsafeBufferPointer(start: nil, count: 0)
         }
         return UnsafeBufferPointer(start: ptr, count: Int(count))

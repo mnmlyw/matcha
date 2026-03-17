@@ -10,6 +10,7 @@ const PieceTable = @import("../buffer/PieceTable.zig").PieceTable;
 const CellList = std.ArrayListUnmanaged(Cell.RenderCell);
 const CursorList = std.ArrayListUnmanaged(Cell.RenderCursor);
 const RectList = std.ArrayListUnmanaged(Cell.RenderRect);
+const LineNumberList = std.ArrayListUnmanaged(Cell.RenderLineNumber);
 
 const LineStateCache = struct {
     /// Cached line states at interval boundaries
@@ -46,6 +47,7 @@ pub const RenderState = struct {
     cursors: CursorList,
     selections: RectList,
     line_numbers: RectList,
+    line_number_labels: LineNumberList,
     bracket_highlights: RectList,
     line_state_cache: LineStateCache = .{},
 
@@ -63,6 +65,7 @@ pub const RenderState = struct {
             .cursors = .{},
             .selections = .{},
             .line_numbers = .{},
+            .line_number_labels = .{},
             .bracket_highlights = .{},
         };
     }
@@ -72,6 +75,7 @@ pub const RenderState = struct {
         self.cursors.deinit(self.allocator);
         self.selections.deinit(self.allocator);
         self.line_numbers.deinit(self.allocator);
+        self.line_number_labels.deinit(self.allocator);
         self.bracket_highlights.deinit(self.allocator);
         self.line_state_cache.deinit(self.allocator);
     }
@@ -89,6 +93,7 @@ pub const RenderState = struct {
         self.cursors.clearRetainingCapacity();
         self.selections.clearRetainingCapacity();
         self.line_numbers.clearRetainingCapacity();
+        self.line_number_labels.clearRetainingCapacity();
         self.bracket_highlights.clearRetainingCapacity();
 
         const cell_w = editor.cell_width;
@@ -200,7 +205,6 @@ pub const RenderState = struct {
             }
 
             var token_idx: u32 = 0;
-            var rendered_chars: u32 = 0;
 
             // Iterate characters with UTF-8 and wrapping
             var col: u32 = 0; // byte offset within line
@@ -217,6 +221,14 @@ pub const RenderState = struct {
                         .w = gutter_w,
                         .h = cell_h,
                         .color = config.gutter_bg_color,
+                    }) catch {};
+                    self.line_number_labels.append(self.allocator, .{
+                        .x = 0,
+                        .y = y0,
+                        .w = gutter_w,
+                        .h = cell_h,
+                        .color = config.line_number_color,
+                        .line = line + 1,
                     }) catch {};
                 }
             }
@@ -275,21 +287,20 @@ pub const RenderState = struct {
                         .glyph_index = codepoint,
                         .style = 0,
                     }) catch {};
-                    rendered_chars += 1;
                 }
 
                 col += cp_len;
                 vcol += 1;
             }
 
-            // Track longest visible line for scroll clamping
-            if (rendered_chars > max_line_len) max_line_len = rendered_chars;
+            // Track the full line width, not just currently visible cells.
+            if (vcol > max_line_len) max_line_len = vcol;
 
             // Visual rows this line occupies
             const line_vrows: u32 = if (wrap_enabled) @max(1, if (vcol == 0) @as(u32, 1) else (vcol + wrap_col - 1) / wrap_col) else 1;
 
             // If line has no visible chars but is selected, add a selection rect
-            if (sel_active and rendered_chars == 0) {
+            if (sel_active and vcol == 0) {
                 if (line >= sel_start_line and line <= sel_end_line) {
                     const y = @as(f32, @floatFromInt(line_base_vrow)) * cell_h - editor.scroll_y;
                     self.selections.append(self.allocator, .{
@@ -427,3 +438,25 @@ pub const RenderState = struct {
         return true;
     }
 };
+
+const testing = std.testing;
+const Config = @import("../config/Config.zig").Config;
+const Editor = @import("../editor/Editor.zig").Editor;
+
+test "RenderState: wrapped gutter rows only emit one line number label" {
+    var config = Config.defaults();
+    config.wrap_lines = true;
+    config.line_numbers = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(8, 10, 1, 1);
+    try ed.insertText("abcdefghi");
+
+    ed.prepareRender();
+
+    try testing.expectEqual(@as(usize, 3), ed.render_state.line_numbers.items.len);
+    try testing.expectEqual(@as(usize, 1), ed.render_state.line_number_labels.items.len);
+    try testing.expectEqual(@as(u32, 1), ed.render_state.line_number_labels.items[0].line);
+}

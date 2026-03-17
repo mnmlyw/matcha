@@ -36,13 +36,30 @@ pub fn build(b: *std.Build) void {
         \\set -e
         \\SDK=$(xcrun --show-sdk-path)
         \\MACOS_VER=$(sw_vers -productVersion | cut -d. -f1,2)
+        \\TARGET_ARCH=$(uname -m)
         \\APP=zig-out/Matcha.app/Contents/MacOS
         \\mkdir -p "$APP"
         \\cp macos/Matcha-Info.plist zig-out/Matcha.app/Contents/Info.plist
+        \\mkdir -p zig-out/Matcha.app/Contents/Resources
+        \\ICONSET=/tmp/matcha_AppIcon.iconset
+        \\mkdir -p "$ICONSET"
+        \\ICONS=macos/Assets.xcassets/AppIcon.appiconset
+        \\cp "$ICONS/icon_16x16.png"     "$ICONSET/icon_16x16.png"
+        \\cp "$ICONS/icon_32x32.png"     "$ICONSET/icon_16x16@2x.png"
+        \\cp "$ICONS/icon_32x32.png"     "$ICONSET/icon_32x32.png"
+        \\cp "$ICONS/icon_64x64.png"     "$ICONSET/icon_32x32@2x.png"
+        \\cp "$ICONS/icon_128x128.png"   "$ICONSET/icon_128x128.png"
+        \\cp "$ICONS/icon_256x256.png"   "$ICONSET/icon_128x128@2x.png"
+        \\cp "$ICONS/icon_256x256.png"   "$ICONSET/icon_256x256.png"
+        \\cp "$ICONS/icon_512x512.png"   "$ICONSET/icon_256x256@2x.png"
+        \\cp "$ICONS/icon_512x512.png"   "$ICONSET/icon_512x512.png"
+        \\cp "$ICONS/icon_1024x1024.png" "$ICONSET/icon_512x512@2x.png"
+        \\iconutil -c icns "$ICONSET" -o zig-out/Matcha.app/Contents/Resources/AppIcon.icns
+        \\rm -rf "$ICONSET"
         \\swiftc \
         \\  -swift-version 5 \
         \\  -sdk "$SDK" \
-        \\  -target "arm64-apple-macosx${MACOS_VER}" \
+        \\  -target "${TARGET_ARCH}-apple-macosx${MACOS_VER}" \
         \\  -I include \
         \\  -L zig-out/lib \
         \\  -lmatcha \

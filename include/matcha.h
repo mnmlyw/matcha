@@ -48,6 +48,12 @@ typedef struct {
     uint32_t color;    // 0xRRGGBBAA
 } matcha_render_rect_s;
 
+typedef struct {
+    float x, y, w, h;
+    uint32_t color;    // 0xRRGGBBAA
+    uint32_t line;     // 1-based display line number
+} matcha_render_line_number_s;
+
 // ── Editor state info ──────────────────────────────────────────
 typedef struct {
     uint32_t cursor_line;   // 1-based
@@ -176,6 +182,7 @@ const matcha_render_cell_s* matcha_editor_get_cells(matcha_editor_t ed, uint32_t
 const matcha_render_cursor_s* matcha_editor_get_cursors(matcha_editor_t ed, uint32_t* count);
 const matcha_render_rect_s* matcha_editor_get_selections(matcha_editor_t ed, uint32_t* count);
 const matcha_render_rect_s* matcha_editor_get_line_number_cells(matcha_editor_t ed, uint32_t* count);
+const matcha_render_line_number_s* matcha_editor_get_line_number_labels(matcha_editor_t ed, uint32_t* count);
 
 const uint8_t* matcha_editor_get_atlas_data(matcha_editor_t ed,
                                              uint32_t* width, uint32_t* height);

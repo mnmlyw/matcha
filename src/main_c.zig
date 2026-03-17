@@ -383,10 +383,140 @@ const InputKey = extern struct {
     text_len: u32,
 };
 
+const mod_shift: u32 = 1 << 0;
+const mod_alt: u32 = 1 << 2;
+const mod_super: u32 = 1 << 3;
+
+fn hasModifier(modifiers: u32, flag: u32) bool {
+    return (modifiers & flag) != 0;
+}
+
 export fn matcha_editor_key_event(ed: ?*Editor, key: InputKey) bool {
-    _ = ed;
-    _ = key;
-    // Key event handling will be expanded — for now, return false (not consumed)
+    const e = ed orelse return false;
+    const has_shift = hasModifier(key.modifiers, mod_shift);
+    const has_alt = hasModifier(key.modifiers, mod_alt);
+    const has_super = hasModifier(key.modifiers, mod_super);
+    const text = if (key.text) |ptr| ptr[0..key.text_len] else "";
+
+    if (has_super) {
+        switch (key.keycode) {
+            0 => {
+                e.selectAll();
+                return true;
+            },
+            2 => {
+                e.duplicateLine() catch |err| e.setLastError(err);
+                return true;
+            },
+            6 => {
+                if (has_shift) {
+                    e.redo() catch |err| e.setLastError(err);
+                } else {
+                    e.undo() catch |err| e.setLastError(err);
+                }
+                return true;
+            },
+            44 => {
+                e.toggleComment() catch |err| e.setLastError(err);
+                return true;
+            },
+            else => {},
+        }
+    }
+
+    switch (key.keycode) {
+        36 => {
+            e.newline() catch |err| e.setLastError(err);
+            return true;
+        },
+        48 => {
+            if (has_shift) {
+                e.dedent() catch |err| e.setLastError(err);
+            } else {
+                e.insertTab() catch |err| e.setLastError(err);
+            }
+            return true;
+        },
+        51 => {
+            if (has_alt) {
+                e.deleteWordBackward() catch |err| e.setLastError(err);
+            } else {
+                e.deleteBackward() catch |err| e.setLastError(err);
+            }
+            return true;
+        },
+        115 => {
+            e.moveStart();
+            return true;
+        },
+        116 => {
+            e.movePageUp();
+            return true;
+        },
+        117 => {
+            if (has_alt) {
+                e.deleteWordForward() catch |err| e.setLastError(err);
+            } else {
+                e.deleteForward() catch |err| e.setLastError(err);
+            }
+            return true;
+        },
+        119 => {
+            e.moveEnd();
+            return true;
+        },
+        121 => {
+            e.movePageDown();
+            return true;
+        },
+        123 => {
+            if (has_super) {
+                if (has_shift) e.selectLineStart() else e.moveLineStart();
+            } else if (has_alt) {
+                if (has_shift) e.selectWordLeft() else e.moveWordLeft();
+            } else {
+                if (has_shift) e.selectLeft() else e.moveLeft();
+            }
+            return true;
+        },
+        124 => {
+            if (has_super) {
+                if (has_shift) e.selectLineEnd() else e.moveLineEnd();
+            } else if (has_alt) {
+                if (has_shift) e.selectWordRight() else e.moveWordRight();
+            } else {
+                if (has_shift) e.selectRight() else e.moveRight();
+            }
+            return true;
+        },
+        125 => {
+            if (has_super and has_alt) {
+                e.moveLineDown() catch |err| e.setLastError(err);
+            } else if (has_super) {
+                if (has_shift) e.selectEnd() else e.moveEnd();
+            } else {
+                if (has_shift) e.selectDown() else e.moveDown();
+            }
+            return true;
+        },
+        126 => {
+            if (has_super and has_alt) {
+                e.moveLineUp() catch |err| e.setLastError(err);
+            } else if (has_super) {
+                if (has_shift) e.selectStart() else e.moveStart();
+            } else {
+                if (has_shift) e.selectUp() else e.moveUp();
+            }
+            return true;
+        },
+        else => {},
+    }
+
+    if (!has_super and text.len > 0) {
+        e.insertText(text) catch |err| e.setLastError(err);
+        return true;
+    }
+
     return false;
 }
 
@@ -537,6 +667,14 @@ export fn matcha_editor_get_line_number_cells(ed: ?*Editor, count: ?*u32) ?[*]co
     return items.ptr;
 }
 
+export fn matcha_editor_get_line_number_labels(ed: ?*Editor, count: ?*u32) ?[*]const Cell.RenderLineNumber {
+    const e = ed orelse return null;
+    const items = e.render_state.line_number_labels.items;
+    if (count) |c| c.* = @intCast(items.len);
+    if (items.len == 0) return null;
+    return items.ptr;
+}
+
 export fn matcha_editor_get_atlas_data(ed: ?*Editor, width: ?*u32, height: ?*u32) ?[*]const u8 {
     _ = ed;
     if (width) |w| w.* = 0;
@@ -578,4 +716,44 @@ export fn matcha_editor_get_info(ed: ?*Editor) EditorInfo {
         .modified = e.modified,
         .filename = if (e.filename_z) |z| z.ptr else null,
     };
+}
+
+const testing = std.testing;
+
+fn expectEditorContent(ed: *Editor, expected: []const u8) !void {
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings(expected, content);
+}
+
+test "main_c: key event inserts text" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try testing.expect(matcha_editor_key_event(&ed, .{
+        .keycode = 0,
+        .modifiers = 0,
+        .text = "x".ptr,
+        .text_len = 1,
+    }));
+
+    try expectEditorContent(&ed, "x");
+}
+
+test "main_c: key event handles undo shortcut" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("x");
+
+    try testing.expect(matcha_editor_key_event(&ed, .{
+        .keycode = 6,
+        .modifiers = mod_super,
+        .text = null,
+        .text_len = 0,
+    }));
+
+    try expectEditorContent(&ed, "");
 }
