@@ -180,7 +180,15 @@ pub const Editor = struct {
     // ── Editing ────────────────────────────────────────────────
 
     pub fn insertText(self: *Editor, text: []const u8) !void {
-        if (try self.handleAutoPair(text)) return;
+        try self.insertTextWithOptions(text, true);
+    }
+
+    fn insertTextLiteral(self: *Editor, text: []const u8) !void {
+        try self.insertTextWithOptions(text, false);
+    }
+
+    fn insertTextWithOptions(self: *Editor, text: []const u8, allow_auto_pair: bool) !void {
+        if (allow_auto_pair and try self.handleAutoPair(text)) return;
 
         // If there's a selection, delete it first
         if (self.selection.active) {
@@ -561,10 +569,12 @@ pub const Editor = struct {
                     try self.buffer.delete(prefix_start, remove_len);
 
                     if (li == self.cursor.line and self.cursor.col > indent) {
-                        cursor_col_delta = -@as(i32, @intCast(remove_len));
+                        const delta = @min(remove_len, self.cursor.col - indent);
+                        cursor_col_delta = -@as(i32, @intCast(delta));
                     }
                     if (self.selection.active and li == self.selection.anchor_line and self.selection.anchor_col > indent) {
-                        anchor_col_delta = -@as(i32, @intCast(remove_len));
+                        const delta = @min(remove_len, self.selection.anchor_col - indent);
+                        anchor_col_delta = -@as(i32, @intCast(delta));
                     }
                 } else {
                     // Insert comment prefix + space
@@ -917,7 +927,7 @@ pub const Editor = struct {
     }
 
     pub fn paste(self: *Editor, text: []const u8) !void {
-        try self.insertText(text);
+        try self.insertTextLiteral(text);
     }
 
     // ── Undo/Redo ──────────────────────────────────────────────
@@ -1328,7 +1338,7 @@ pub const Editor = struct {
                     (!options.whole_word or self.isWholeWordMatch(start_pos, end_pos)))
                 {
                     try self.deleteSelection();
-                    try self.insertText(replacement);
+                    try self.insertTextLiteral(replacement);
                     _ = self.findNextWithOptions(query, options);
                     return true;
                 }
@@ -1356,7 +1366,7 @@ pub const Editor = struct {
                 self.selection.setAnchor(start_lc.line, start_lc.col);
                 self.cursor.moveTo(end_lc.line, end_lc.col);
                 try self.deleteSelection();
-                try self.insertText(replacement);
+                try self.insertTextLiteral(replacement);
                 search_pos += @as(u32, @intCast(replacement.len));
                 count += 1;
             } else {
@@ -1550,7 +1560,11 @@ pub const Editor = struct {
         }
 
         const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
-        return .{ .start_line = range.start_line, .end_line = range.end_line };
+        var end_line = range.end_line;
+        if (range.end_col == 0 and end_line > range.start_line) {
+            end_line -= 1;
+        }
+        return .{ .start_line = range.start_line, .end_line = end_line };
     }
 
     fn handleAutoPair(self: *Editor, text: []const u8) !bool {
@@ -2098,6 +2112,17 @@ test "Editor: auto-pairs delimiters" {
     try testing.expectEqual(@as(u32, 2), ed.cursor.col);
 }
 
+test "Editor: paste inserts delimiters literally" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.paste("(");
+
+    try expectContent(&ed, "(");
+    try testing.expectEqual(@as(u32, 1), ed.cursor.col);
+}
+
 test "Editor: auto-pair wraps selection" {
     const config = Config.defaults();
     var ed = Editor.init(testing.allocator, &config);
@@ -2146,6 +2171,51 @@ test "Editor: toggleComment adds and removes line comments" {
     try testing.expectEqual(@as(u32, 7), ed.cursor.col);
 }
 
+test "Editor: toggleComment line selection excludes following line" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.language = .zig;
+    try ed.insertText("foo\nbar");
+    ed.selection.setAnchor(0, 0);
+    ed.cursor.moveTo(1, 0);
+
+    try ed.toggleComment();
+    try expectContent(&ed, "// foo\nbar");
+}
+
+test "Editor: toggleComment clamps cursor inside removed prefix" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.language = .zig;
+    try ed.insertText("    // foo");
+    ed.cursor.moveTo(0, 5);
+
+    try ed.toggleComment();
+    try expectContent(&ed, "    foo");
+    try testing.expectEqual(@as(u32, 4), ed.cursor.col);
+}
+
+test "Editor: toggleComment clamps selection anchor inside removed prefix" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.language = .zig;
+    try ed.insertText("    // foo");
+    ed.selection.setAnchor(0, 5);
+    ed.cursor.moveTo(0, 8);
+
+    try ed.toggleComment();
+    try expectContent(&ed, "    foo");
+    try testing.expect(ed.selection.active);
+    try testing.expectEqual(@as(u32, 4), ed.selection.anchor_col);
+    try testing.expectEqual(@as(u32, 5), ed.cursor.col);
+}
+
 test "Editor: duplicateLine duplicates current line" {
     const config = Config.defaults();
     var ed = Editor.init(testing.allocator, &config);
@@ -2175,6 +2245,19 @@ test "Editor: duplicateLine duplicates selected block" {
     try testing.expectEqual(@as(u32, 3), ed.cursor.line);
 }
 
+test "Editor: duplicateLine line selection excludes following line" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\nb\nc");
+    ed.selection.setAnchor(0, 0);
+    ed.cursor.moveTo(1, 0);
+
+    try ed.duplicateLine();
+    try expectContent(&ed, "a\na\nb\nc");
+}
+
 test "Editor: moveLineDown moves current line" {
     const config = Config.defaults();
     var ed = Editor.init(testing.allocator, &config);
@@ -2187,6 +2270,19 @@ test "Editor: moveLineDown moves current line" {
     try ed.moveLineDown();
     try expectContent(&ed, "a\nc\nb");
     try testing.expectEqual(@as(u32, 2), ed.cursor.line);
+}
+
+test "Editor: moveLineDown line selection excludes following line" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\nb\nc");
+    ed.selection.setAnchor(0, 0);
+    ed.cursor.moveTo(1, 0);
+
+    try ed.moveLineDown();
+    try expectContent(&ed, "b\na\nc");
 }
 
 test "Editor: moveLineUp moves selected block" {
@@ -2225,6 +2321,31 @@ test "Editor: findNextWithOptions is case-insensitive" {
         defer ed.allocator.free(sel);
         try testing.expectEqualStrings("hELLo", sel);
     }
+}
+
+test "Editor: replaceNextWithOptions inserts literal replacement" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a");
+    ed.moveStart();
+    try testing.expect(ed.findNextWithOptions("a", .{}));
+    try testing.expect(try ed.replaceNextWithOptions("a", "(", .{}));
+
+    try expectContent(&ed, "(");
+}
+
+test "Editor: replaceAllWithOptions inserts literal replacement" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("aba");
+    const replaced = try ed.replaceAllWithOptions("a", "(", .{});
+
+    try testing.expectEqual(@as(u32, 2), replaced);
+    try expectContent(&ed, "(b(");
 }
 
 test "Editor: replaceAllWithOptions respects whole-word matching" {

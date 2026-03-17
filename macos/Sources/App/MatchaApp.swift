@@ -92,7 +92,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func newWindowAction() {
         // Ask SwiftUI to open a new WindowGroup window
         if #available(macOS 13.0, *) {
-            NSApp.sendAction(Selector(("newWindowForTab:")), to: nil, from: nil)
+            NSApp.sendAction(#selector(NSResponder.newWindowForTab(_:)), to: nil, from: nil)
         }
     }
 
