@@ -33,9 +33,8 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         super.init(frame: .zero, device: MTLCreateSystemDefaultDevice())
 
         self.delegate = self
-        self.isPaused = false
-        self.enableSetNeedsDisplay = false
-        self.preferredFramesPerSecond = 60
+        self.isPaused = true
+        self.enableSetNeedsDisplay = true
         self.clearColor = MTLClearColor(red: 22.0/255.0, green: 24.0/255.0, blue: 26.0/255.0, alpha: 1.0)
 
         // Calculate cell dimensions from font (in points)
@@ -88,10 +87,12 @@ class MetalEditorView: MTKView, MTKViewDelegate {
                 queue: .main
             ) { [weak self] _ in
                 self?.editor.markActive()
+                self?.requestRedraw()
             }
             window.makeFirstResponder(self)
             editor.markActive()
             updateViewport()
+            requestRedraw()
         }
     }
 
@@ -101,19 +102,19 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         // Force immediate redraw during resize to avoid stale frame stretching
         if inLiveResize {
             self.draw()
+        } else {
+            requestRedraw()
         }
     }
 
     override func viewWillStartLiveResize() {
         super.viewWillStartLiveResize()
-        self.isPaused = false
-        self.enableSetNeedsDisplay = false
+        requestRedraw()
     }
 
     override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
-        self.isPaused = false
-        self.enableSetNeedsDisplay = false
+        requestRedraw()
     }
 
     private func calculateCellDimensions() {
@@ -135,10 +136,15 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         )
     }
 
+    private func requestRedraw() {
+        needsDisplay = true
+    }
+
     // MARK: - MTKViewDelegate
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         updateViewport()
+        requestRedraw()
     }
 
     func draw(in view: MTKView) {
@@ -152,12 +158,14 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         cursorBlinkTimer?.invalidate()
         cursorBlinkTimer = Timer.scheduledTimer(withTimeInterval: 0.53, repeats: true) { [weak self] _ in
             self?.cursorVisible.toggle()
+            self?.requestRedraw()
         }
     }
 
     private func resetCursorBlink() {
         cursorVisible = true
         startCursorBlink()
+        requestRedraw()
     }
 
     // MARK: - Keyboard Input
@@ -239,6 +247,7 @@ class MetalEditorView: MTKView, MTKViewDelegate {
         let dx = Float(-event.scrollingDeltaX)
         let dy = Float(-event.scrollingDeltaY)
         editor.scroll(dx: dx, dy: dy)
+        requestRedraw()
     }
 
     // MARK: - Clipboard

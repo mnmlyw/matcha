@@ -4,6 +4,8 @@ import CoreText
 import MatchaKit
 
 class MetalRenderer {
+    private static let quadStride = MemoryLayout<QuadVertex>.stride
+
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     let bgPipeline: MTLRenderPipelineState
@@ -48,6 +50,19 @@ class MetalRenderer {
     var atlasDirty = true
 
     var scaleFactor: Float = 2.0
+    let ascender: Float
+
+    private var bgQuads: [QuadVertex] = []
+    private var textQuads: [QuadVertex] = []
+    private var gutterQuads: [QuadVertex] = []
+    private var cursorQuads: [QuadVertex] = []
+    private var lineNumberQuads: [QuadVertex] = []
+
+    private var bgVertexBuffer: MTLBuffer?
+    private var textVertexBuffer: MTLBuffer?
+    private var gutterVertexBuffer: MTLBuffer?
+    private var cursorVertexBuffer: MTLBuffer?
+    private var lineNumberVertexBuffer: MTLBuffer?
 
     init?(device: MTLDevice, view: MTKView, font: NSFont, cellWidth: Float, cellHeight: Float, scaleFactor: Float = 2.0) {
         self.device = device
@@ -57,6 +72,7 @@ class MetalRenderer {
         self.cellHeight = cellHeight
         self.scaleFactor = scaleFactor
         self.ctFont = font as CTFont
+        self.ascender = Float(CTFontGetAscent(font as CTFont)) / scaleFactor
         self.atlasData = [UInt8](repeating: 0, count: atlasWidth * atlasHeight)
 
         // Create shader library
@@ -127,8 +143,8 @@ class MetalRenderer {
 
         // Pass 1: Cell backgrounds + selection rects (no gutter yet)
         encoder.setRenderPipelineState(bgPipeline)
-
-        var bgQuads: [QuadVertex] = []
+        bgQuads.removeAll(keepingCapacity: true)
+        bgQuads.reserveCapacity((cells.count + selections.count + bracketHighlights.count) * 6)
         for i in 0..<cells.count {
             let cell = cells[i]
             let bgColor = colorToRGBA(cell.bg)
@@ -157,8 +173,7 @@ class MetalRenderer {
                        viewWidth: viewWidth, viewHeight: viewHeight)
         }
 
-        if !bgQuads.isEmpty {
-            let buffer = device.makeBuffer(bytes: bgQuads, length: bgQuads.count * MemoryLayout<QuadVertex>.stride, options: .storageModeShared)
+        if let buffer = Self.uploadVertices(bgQuads, device: device, into: &bgVertexBuffer) {
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: bgQuads.count)
         }
@@ -166,8 +181,8 @@ class MetalRenderer {
         // Pass 2: Content text
         encoder.setRenderPipelineState(textPipeline)
         ensureAtlasTexture()
-
-        var textQuads: [QuadVertex] = []
+        textQuads.removeAll(keepingCapacity: true)
+        textQuads.reserveCapacity(cells.count * 6)
         for i in 0..<cells.count {
             let cell = cells[i]
             let codepoint = cell.glyph_index
@@ -176,7 +191,6 @@ class MetalRenderer {
             let uv = ensureGlyph(codepoint: codepoint)
             let fgColor = colorToRGBA(cell.fg)
 
-            let ascender = Float(CTFontGetAscent(ctFont)) / scaleFactor
             let glyphX = cell.x + uv.bearingX
             let glyphY = cell.y + ascender - uv.bearingY
 
@@ -188,8 +202,9 @@ class MetalRenderer {
                            viewWidth: viewWidth, viewHeight: viewHeight)
         }
 
-        if !textQuads.isEmpty, let atlasTexture = glyphAtlasTexture {
-            let buffer = device.makeBuffer(bytes: textQuads, length: textQuads.count * MemoryLayout<QuadVertex>.stride, options: .storageModeShared)
+        if let buffer = Self.uploadVertices(textQuads, device: device, into: &textVertexBuffer),
+           let atlasTexture = glyphAtlasTexture
+        {
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
             encoder.setFragmentTexture(atlasTexture, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: textQuads.count)
@@ -197,7 +212,8 @@ class MetalRenderer {
 
         // Pass 3: Gutter backgrounds (drawn ON TOP of content to mask any overflow)
         encoder.setRenderPipelineState(bgPipeline)
-        var gutterQuads: [QuadVertex] = []
+        gutterQuads.removeAll(keepingCapacity: true)
+        gutterQuads.reserveCapacity(gutterRows.count * 6)
         for i in 0..<gutterRows.count {
             let ln = gutterRows[i]
             let rgba = colorToRGBA(ln.color)
@@ -205,8 +221,7 @@ class MetalRenderer {
                        r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a,
                        viewWidth: viewWidth, viewHeight: viewHeight)
         }
-        if !gutterQuads.isEmpty {
-            let buffer = device.makeBuffer(bytes: gutterQuads, length: gutterQuads.count * MemoryLayout<QuadVertex>.stride, options: .storageModeShared)
+        if let buffer = Self.uploadVertices(gutterQuads, device: device, into: &gutterVertexBuffer) {
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: gutterQuads.count)
         }
@@ -217,7 +232,8 @@ class MetalRenderer {
         // Pass 5: Cursors
         if cursorVisible {
             encoder.setRenderPipelineState(cursorPipeline)
-            var cursorQuads: [QuadVertex] = []
+            cursorQuads.removeAll(keepingCapacity: true)
+            cursorQuads.reserveCapacity(cursors.count * 6)
             for i in 0..<cursors.count {
                 let cursor = cursors[i]
                 let rgba = colorToRGBA(cursor.color)
@@ -225,8 +241,7 @@ class MetalRenderer {
                            r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a,
                            viewWidth: viewWidth, viewHeight: viewHeight)
             }
-            if !cursorQuads.isEmpty {
-                let buffer = device.makeBuffer(bytes: cursorQuads, length: cursorQuads.count * MemoryLayout<QuadVertex>.stride, options: .storageModeShared)
+            if let buffer = Self.uploadVertices(cursorQuads, device: device, into: &cursorVertexBuffer) {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cursorQuads.count)
             }
@@ -244,7 +259,8 @@ class MetalRenderer {
         encoder.setRenderPipelineState(textPipeline)
         ensureAtlasTexture()
 
-        var textQuads: [QuadVertex] = []
+        lineNumberQuads.removeAll(keepingCapacity: true)
+        lineNumberQuads.reserveCapacity(lineNumbers.count * 24)
 
         for i in 0..<lineNumbers.count {
             let ln = lineNumbers[i]
@@ -258,11 +274,10 @@ class MetalRenderer {
                 let codepoint = UInt32(char.asciiValue ?? 48)
                 let uv = ensureGlyph(codepoint: codepoint)
 
-                let ascender = Float(CTFontGetAscent(ctFont)) / scaleFactor
                 let digitX = ln.x + gutterW - Float(numStr.count - charIdx) * cellWidth - rightPad
                 let digitY = ln.y + ascender - uv.bearingY
 
-                appendTextQuad(&textQuads,
+                appendTextQuad(&lineNumberQuads,
                                x: digitX + uv.bearingX, y: digitY,
                                w: uv.glyphWidth, h: uv.glyphHeight,
                                uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
@@ -271,12 +286,34 @@ class MetalRenderer {
             }
         }
 
-        if !textQuads.isEmpty, let atlasTexture = glyphAtlasTexture {
-            let buffer = device.makeBuffer(bytes: textQuads, length: textQuads.count * MemoryLayout<QuadVertex>.stride, options: .storageModeShared)
+        if let buffer = Self.uploadVertices(lineNumberQuads, device: device, into: &lineNumberVertexBuffer),
+           let atlasTexture = glyphAtlasTexture
+        {
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
             encoder.setFragmentTexture(atlasTexture, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: textQuads.count)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: lineNumberQuads.count)
         }
+    }
+
+    private static func uploadVertices(_ vertices: [QuadVertex], device: MTLDevice, into buffer: inout MTLBuffer?) -> MTLBuffer? {
+        guard !vertices.isEmpty else { return nil }
+
+        let requiredLength = max(vertices.count * quadStride, quadStride)
+        if buffer == nil || buffer!.length < requiredLength {
+            var newLength = max(buffer?.length ?? quadStride * 64, quadStride * 64)
+            while newLength < requiredLength {
+                newLength *= 2
+            }
+            buffer = device.makeBuffer(length: newLength, options: .storageModeShared)
+        }
+
+        guard let vertexBuffer = buffer else { return nil }
+        vertices.withUnsafeBytes { rawBuffer in
+            if let baseAddress = rawBuffer.baseAddress {
+                vertexBuffer.contents().copyMemory(from: baseAddress, byteCount: rawBuffer.count)
+            }
+        }
+        return vertexBuffer
     }
 
     // MARK: - Glyph Atlas

@@ -54,6 +54,10 @@ pub const Editor = struct {
     wrap_cache_edit_counter: u32 = 0xFFFFFFFF,
     wrap_cache_wrap_col: u32 = 0,
 
+    // Search cache: contiguous buffer snapshot for repeated find operations
+    search_content_cache: std.ArrayListUnmanaged(u8) = .{},
+    search_cache_edit_counter: u32 = 0xFFFFFFFF,
+
     pub fn init(allocator: Allocator, config: *const Config) Editor {
         return .{
             .allocator = allocator,
@@ -71,6 +75,7 @@ pub const Editor = struct {
         self.undo_stack.deinit();
         self.render_state.deinit();
         self.wrap_prefix_sums.deinit(self.allocator);
+        self.search_content_cache.deinit(self.allocator);
         if (self.filename_z) |z| self.allocator.free(z);
         if (self.filename_owned) {
             if (self.filename) |f| self.allocator.free(f);
@@ -1240,8 +1245,7 @@ pub const Editor = struct {
         const qlen: u32 = @intCast(query.len);
         if (qlen > total) return false;
 
-        const content = self.buffer.getContent(self.allocator) catch return false;
-        defer self.allocator.free(content);
+        const content = self.searchContent() catch return false;
 
         const cursor_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
 
@@ -1279,8 +1283,7 @@ pub const Editor = struct {
         const qlen: u32 = @intCast(query.len);
         if (qlen > total) return false;
 
-        const content = self.buffer.getContent(self.allocator) catch return false;
-        defer self.allocator.free(content);
+        const content = self.searchContent() catch return false;
 
         const max_start: u32 = total - qlen;
 
@@ -1656,6 +1659,20 @@ pub const Editor = struct {
             if (!byteEqual(content[p + i], qch, options.case_sensitive)) return false;
         }
         return true;
+    }
+
+    fn searchContent(self: *Editor) ![]const u8 {
+        if (self.search_cache_edit_counter == self.edit_counter) {
+            return self.search_content_cache.items;
+        }
+
+        const total = self.buffer.totalLength();
+        try self.search_content_cache.resize(self.allocator, total);
+        if (total > 0) {
+            self.buffer.copyRange(0, total, self.search_content_cache.items);
+        }
+        self.search_cache_edit_counter = self.edit_counter;
+        return self.search_content_cache.items;
     }
 
     fn isWholeWordInContent(content: []const u8, start: u32, end: u32, total: u32) bool {
@@ -2321,6 +2338,26 @@ test "Editor: findNextWithOptions is case-insensitive" {
         defer ed.allocator.free(sel);
         try testing.expectEqualStrings("hELLo", sel);
     }
+}
+
+test "Editor: search content cache is reused until edit" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("hello world");
+    const first = try ed.searchContent();
+    const first_ptr = first.ptr;
+
+    try testing.expect(ed.findNextWithOptions("world", .{}));
+    const second = try ed.searchContent();
+    try testing.expectEqual(first_ptr, second.ptr);
+
+    ed.selection.clear();
+    ed.moveEnd();
+    try ed.insertText("!");
+    const third = try ed.searchContent();
+    try testing.expectEqualStrings("hello world!", third);
 }
 
 test "Editor: replaceNextWithOptions inserts literal replacement" {

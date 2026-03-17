@@ -13,6 +13,7 @@ struct FindBarView: View {
     let onReplaceNext: () -> Void
     let onReplaceAll: () -> Void
     @FocusState private var searchFieldFocused: Bool
+    @State private var liveSearchWorkItem: DispatchWorkItem?
 
     var body: some View {
         VStack(spacing: 4) {
@@ -30,9 +31,7 @@ struct FindBarView: View {
                         onFindNext()
                     }
                     .onChange(of: searchText) {
-                        if !searchText.isEmpty {
-                            onFindNext()
-                        }
+                        scheduleLiveSearch()
                     }
 
                 Button(action: onFindPrev) {
@@ -108,19 +107,28 @@ struct FindBarView: View {
             }
         }
         .onChange(of: caseSensitive) {
-            if !searchText.isEmpty {
-                onFindNext()
-            }
+            scheduleLiveSearch()
         }
         .onChange(of: wholeWord) {
-            if !searchText.isEmpty {
-                onFindNext()
-            }
+            scheduleLiveSearch()
+        }
+        .onDisappear {
+            liveSearchWorkItem?.cancel()
         }
     }
 
     private func close() {
+        liveSearchWorkItem?.cancel()
         isVisible = false
         showReplace = false
+    }
+
+    private func scheduleLiveSearch() {
+        liveSearchWorkItem?.cancel()
+        guard !searchText.isEmpty else { return }
+
+        let workItem = DispatchWorkItem(block: onFindNext)
+        liveSearchWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: workItem)
     }
 }

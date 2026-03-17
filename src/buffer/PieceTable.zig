@@ -402,6 +402,15 @@ pub const PieceTable = struct {
     pub fn getRange(self: *const PieceTable, allocator: Allocator, start: u32, end: u32) ![]u8 {
         const len = end - start;
         const buf = try allocator.alloc(u8, len);
+        self.copyRange(start, end, buf);
+        return buf;
+    }
+
+    /// Copy content in a byte range into a caller-provided buffer.
+    pub fn copyRange(self: *const PieceTable, start: u32, end: u32, dest: []u8) void {
+        const len = end - start;
+        std.debug.assert(dest.len >= len);
+
         var written: u32 = 0;
         var offset: u32 = 0;
         for (self.pieces.items) |p| {
@@ -415,11 +424,10 @@ pub const PieceTable = struct {
             const copy_start = if (start > offset) start - offset else 0;
             const copy_end = if (end < piece_end) end - offset else p.length;
             const segment = slice[copy_start..copy_end];
-            @memcpy(buf[written..][0..segment.len], segment);
+            @memcpy(dest[written..][0..segment.len], segment);
             written += @intCast(segment.len);
             offset = piece_end;
         }
-        return buf;
     }
 
     /// Get line start/end offsets for lines [first_line, last_line) in a single pass.

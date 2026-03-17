@@ -2,8 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Cell = @import("Cell.zig");
 const Lexer = @import("../highlight/Lexer.zig");
-const TokenType = @import("../highlight/TokenType.zig").TokenType;
-const Theme = @import("../highlight/TokenType.zig").Theme;
 const Language = @import("../highlight/Language.zig").Language;
 const PieceTable = @import("../buffer/PieceTable.zig").PieceTable;
 
@@ -41,6 +39,54 @@ const LineStateCache = struct {
     }
 };
 
+const LineTokenCacheEntry = struct {
+    tokens: []Lexer.Token = &.{},
+    end_state: Lexer.LineState = .{},
+    valid: bool = false,
+
+    fn deinit(self: *LineTokenCacheEntry, allocator: Allocator) void {
+        if (self.tokens.len > 0) allocator.free(self.tokens);
+        self.* = .{};
+    }
+};
+
+const LineTokenCache = struct {
+    entries: std.ArrayListUnmanaged(LineTokenCacheEntry) = .{},
+    cached_line_count: u32 = 0,
+    cached_language: Language = .none,
+    cached_edit_counter: u32 = 0xFFFFFFFF,
+
+    fn deinit(self: *LineTokenCache, allocator: Allocator) void {
+        for (self.entries.items) |*entry| {
+            entry.deinit(allocator);
+        }
+        self.entries.deinit(allocator);
+    }
+
+    fn invalidate(self: *LineTokenCache, allocator: Allocator, line_count: u32, lang: Language, edit_counter: u32) void {
+        for (self.entries.items) |*entry| {
+            entry.deinit(allocator);
+        }
+
+        self.entries.clearRetainingCapacity();
+        self.entries.ensureTotalCapacity(allocator, line_count) catch {
+            self.cached_line_count = 0;
+            self.cached_language = lang;
+            self.cached_edit_counter = edit_counter;
+            return;
+        };
+
+        var i: u32 = 0;
+        while (i < line_count) : (i += 1) {
+            self.entries.appendAssumeCapacity(.{});
+        }
+
+        self.cached_line_count = line_count;
+        self.cached_language = lang;
+        self.cached_edit_counter = edit_counter;
+    }
+};
+
 pub const RenderState = struct {
     allocator: Allocator,
     cells: CellList,
@@ -50,6 +96,8 @@ pub const RenderState = struct {
     line_number_labels: LineNumberList,
     bracket_highlights: RectList,
     line_state_cache: LineStateCache = .{},
+    line_token_cache: LineTokenCache = .{},
+    scratch_line: std.ArrayListUnmanaged(u8) = .{},
 
     // Cached bracket match to avoid recomputing every frame
     cached_bracket_cursor_line: u32 = 0xFFFFFFFF,
@@ -78,10 +126,14 @@ pub const RenderState = struct {
         self.line_number_labels.deinit(self.allocator);
         self.bracket_highlights.deinit(self.allocator);
         self.line_state_cache.deinit(self.allocator);
+        self.line_token_cache.deinit(self.allocator);
+        self.scratch_line.deinit(self.allocator);
     }
 
     /// Compute render data for the visible viewport.
     pub fn compute(self: *RenderState, editor: anytype) void {
+        const line_count = editor.buffer.lineCount();
+
         // Invalidate caches if buffer was edited
         if (self.last_edit_counter != editor.edit_counter) {
             self.last_edit_counter = editor.edit_counter;
@@ -108,6 +160,17 @@ pub const RenderState = struct {
         const wrap_enabled = config.wrap_lines;
         const wrap_col: u32 = if (wrap_enabled) editor.wrapCol() else std.math.maxInt(u32);
 
+        if (highlight) {
+            if (self.line_token_cache.cached_edit_counter != editor.edit_counter or
+                self.line_token_cache.cached_language != lang or
+                self.line_token_cache.cached_line_count != line_count)
+            {
+                self.line_token_cache.invalidate(self.allocator, line_count, lang, editor.edit_counter);
+            }
+        } else if (self.line_token_cache.cached_line_count != 0) {
+            self.line_token_cache.invalidate(self.allocator, 0, .none, editor.edit_counter);
+        }
+
         // Track max line length for horizontal scroll clamping
         var max_line_len: u32 = 0;
 
@@ -131,8 +194,6 @@ pub const RenderState = struct {
 
         var scan_vrow: u32 = 0;
         var first_line: u32 = 0;
-        const line_count = editor.buffer.lineCount();
-
         if (wrap_enabled) {
             while (first_line < line_count) {
                 const vrows = editor.lineVisualRows(first_line);
@@ -155,11 +216,7 @@ pub const RenderState = struct {
             line_state = nearest.state;
             var scan_line = nearest.from_line;
             while (scan_line < first_line) : (scan_line += 1) {
-                const scan_content = getLineBytesAlloc(self.allocator, editor, scan_line) catch break;
-                defer self.allocator.free(scan_content);
-                const result = Lexer.tokenizeLine(self.allocator, scan_content, line_state, lang) catch break;
-                line_state = result.end_state;
-                self.allocator.free(result.tokens);
+                line_state = self.lineEndState(editor, scan_line, line_state, lang) catch break;
             }
         }
 
@@ -189,18 +246,12 @@ pub const RenderState = struct {
                 }
             }
 
-            // Tokenize line for highlighting
-            var tokens: ?[]Lexer.Token = null;
-            defer if (tokens) |t| self.allocator.free(t);
-
+            var tokens: ?[]const Lexer.Token = null;
             if (highlight) {
-                const line_content = getLineBytesAlloc(self.allocator, editor, line) catch null;
-                defer if (line_content) |lc| self.allocator.free(lc);
-                if (line_content) |lc| {
-                    if (Lexer.tokenizeLine(self.allocator, lc, line_state, lang)) |result| {
-                        tokens = result.tokens;
-                        line_state = result.end_state;
-                    } else |_| {}
+                const entry = self.lineTokens(editor, line, line_state, lang) catch null;
+                if (entry) |cached| {
+                    tokens = cached.tokens;
+                    line_state = cached.end_state;
                 }
             }
 
@@ -402,11 +453,7 @@ pub const RenderState = struct {
 
         var line: u32 = 0;
         while (line < total_lines) : (line += 1) {
-            const content = getLineBytesAlloc(self.allocator, editor, line) catch break;
-            defer self.allocator.free(content);
-            const result = Lexer.tokenizeLine(self.allocator, content, state, lang) catch break;
-            state = result.end_state;
-            self.allocator.free(result.tokens);
+            state = self.lineEndState(editor, line, state, lang) catch break;
 
             // Save checkpoint at interval boundaries
             if ((line + 1) % interval == 0) {
@@ -418,17 +465,44 @@ pub const RenderState = struct {
         self.line_state_cache.dirty = false;
     }
 
-    fn getLineBytesAlloc(allocator: Allocator, editor: anytype, line: u32) ![]u8 {
+    fn lineTokens(
+        self: *RenderState,
+        editor: anytype,
+        line: u32,
+        line_state: Lexer.LineState,
+        lang: Language,
+    ) !*const LineTokenCacheEntry {
+        const idx: usize = @intCast(line);
+        const entry = &self.line_token_cache.entries.items[idx];
+        if (!entry.valid) {
+            const line_bytes = try self.lineBytes(editor, line);
+            const result = try Lexer.tokenizeLine(self.allocator, line_bytes, line_state, lang);
+            entry.tokens = result.tokens;
+            entry.end_state = result.end_state;
+            entry.valid = true;
+        }
+        return entry;
+    }
+
+    fn lineEndState(self: *RenderState, editor: anytype, line: u32, line_state: Lexer.LineState, lang: Language) !Lexer.LineState {
+        const idx: usize = @intCast(line);
+        if (self.line_token_cache.entries.items.len > idx) {
+            const entry = &self.line_token_cache.entries.items[idx];
+            if (entry.valid) return entry.end_state;
+        }
+
+        const line_bytes = try self.lineBytes(editor, line);
+        return Lexer.scanLineState(line_bytes, line_state, lang);
+    }
+
+    fn lineBytes(self: *RenderState, editor: anytype, line: u32) ![]const u8 {
         const start = editor.buffer.lineStart(line);
         const end = editor.buffer.lineEnd(line);
-        if (end <= start) return try allocator.alloc(u8, 0);
-        // Strip trailing newline for tokenization
-        var actual_end = end;
-        if (editor.buffer.byteAt(actual_end - 1)) |b| {
-            if (b == '\n') actual_end -= 1;
-        }
-        if (actual_end <= start) return try allocator.alloc(u8, 0);
-        return editor.buffer.getRange(allocator, start, actual_end);
+        const len = end - start;
+        try self.scratch_line.resize(self.allocator, len);
+        if (len == 0) return self.scratch_line.items;
+        editor.buffer.copyRange(start, end, self.scratch_line.items);
+        return self.scratch_line.items;
     }
 
     fn isInSelection(line: u32, col: u32, start_line: u32, start_col: u32, end_line: u32, end_col: u32) bool {
@@ -459,4 +533,27 @@ test "RenderState: wrapped gutter rows only emit one line number label" {
     try testing.expectEqual(@as(usize, 3), ed.render_state.line_numbers.items.len);
     try testing.expectEqual(@as(usize, 1), ed.render_state.line_number_labels.items.len);
     try testing.expectEqual(@as(u32, 1), ed.render_state.line_number_labels.items[0].line);
+}
+
+test "RenderState: highlight tokens are reused across redraws without edits" {
+    var config = Config.defaults();
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.language = .zig;
+    ed.setViewport(80, 10, 1, 1);
+    try ed.insertText("const answer = 42;");
+
+    ed.prepareRender();
+
+    const first_tokens = ed.render_state.line_token_cache.entries.items[0].tokens;
+    try testing.expect(first_tokens.len > 0);
+
+    ed.moveLeft();
+    ed.prepareRender();
+
+    const second_tokens = ed.render_state.line_token_cache.entries.items[0].tokens;
+    try testing.expectEqual(first_tokens.ptr, second_tokens.ptr);
+    try testing.expectEqual(first_tokens.len, second_tokens.len);
 }
