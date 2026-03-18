@@ -18,6 +18,7 @@ pub const Config = struct {
     fg_color: u32 = 0xFFFFFFFF, // fg
     cursor_color: u32 = 0xFFFFFFFF,
     selection_color: u32 = 0x3C404880,
+    current_line_color: u32 = 0xFFFFFF0A, // subtle highlight on cursor line
     gutter_fg_color: u32 = 0x7B8496FF, // grey
     gutter_bg_color: u32 = 0x16181AFF, // bg (same as text bg)
     line_number_color: u32 = 0x7B8496FF, // grey
