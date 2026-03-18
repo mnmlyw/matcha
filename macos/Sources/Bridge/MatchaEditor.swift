@@ -260,6 +260,16 @@ class MatchaEditor: ObservableObject {
         matcha_editor_set_viewport(h, width, height, cellWidth, cellHeight)
     }
 
+    func setWideCellWidth(_ width: Float) {
+        guard let h = handle else { return }
+        matcha_editor_set_wide_cell_width(h, width)
+    }
+
+    func setHangulCellWidth(_ width: Float) {
+        guard let h = handle else { return }
+        matcha_editor_set_hangul_cell_width(h, width)
+    }
+
     func scroll(dx: Float, dy: Float) {
         guard let h = handle else { return }
         matcha_editor_scroll(h, dx, dy)

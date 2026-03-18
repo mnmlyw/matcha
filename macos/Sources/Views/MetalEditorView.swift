@@ -13,6 +13,8 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     // Font metrics (in points)
     var cellWidth: CGFloat = 8.4
     var cellHeight: CGFloat = 18.0
+    var wideCellWidth: CGFloat = 14.0
+    var hangulCellWidth: CGFloat = 14.0
     var font: NSFont
     private var inputHandled = false
     private var markedByteRange: Range<UInt32>?
@@ -125,6 +127,46 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         let size = ("M" as NSString).size(withAttributes: attrs)
         cellWidth = ceil(size.width)
         cellHeight = ceil(font.ascender - font.descender + font.leading) + 2
+        wideCellWidth = max(
+            cellWidth,
+            measureWideCellWidth(samples: ["漢", "あ", "ア", "（", "Ａ"])
+        )
+        hangulCellWidth = max(cellWidth, measureWideCellWidth(samples: ["한", "가", "힣"]))
+    }
+
+    private func measureWideCellWidth(samples: [String]) -> CGFloat {
+        let baseFont = font as CTFont
+        var widestAdvance = cellWidth
+
+        for sample in samples {
+            guard let scalar = sample.unicodeScalars.first else { continue }
+
+            var chars: [UniChar] = []
+            let value = scalar.value
+            if value <= 0xFFFF {
+                chars = [UniChar(value)]
+            } else {
+                let hi = ((value - 0x10000) >> 10) + 0xD800
+                let lo = ((value - 0x10000) & 0x3FF) + 0xDC00
+                chars = [UniChar(hi), UniChar(lo)]
+            }
+
+            var glyphs = Array(repeating: CGGlyph(), count: chars.count)
+            CTFontGetGlyphsForCharacters(baseFont, chars, &glyphs, chars.count)
+
+            var renderFont = baseFont
+            if glyphs[0] == 0 {
+                let string = sample as CFString
+                renderFont = CTFontCreateForString(baseFont, string, CFRange(location: 0, length: CFStringGetLength(string)))
+                CTFontGetGlyphsForCharacters(renderFont, chars, &glyphs, chars.count)
+            }
+
+            var advance = CGSize.zero
+            CTFontGetAdvancesForGlyphs(renderFont, .default, glyphs, &advance, 1)
+            widestAdvance = max(widestAdvance, advance.width)
+        }
+
+        return widestAdvance
     }
 
     /// Tell the Zig core about the viewport in **points** (not pixels).
@@ -137,6 +179,8 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             cellWidth: Float(cellWidth),
             cellHeight: Float(cellHeight)
         )
+        editor.setWideCellWidth(Float(wideCellWidth))
+        editor.setHangulCellWidth(Float(hangulCellWidth))
     }
 
     private func requestRedraw() {

@@ -648,6 +648,14 @@ export fn matcha_editor_set_viewport(ed: ?*Editor, width: u32, height: u32, cell
     if (ed) |e| e.setViewport(width, height, cell_w, cell_h);
 }
 
+export fn matcha_editor_set_wide_cell_width(ed: ?*Editor, wide_cell_w: f32) void {
+    if (ed) |e| e.setWideCellWidth(wide_cell_w);
+}
+
+export fn matcha_editor_set_hangul_cell_width(ed: ?*Editor, hangul_cell_w: f32) void {
+    if (ed) |e| e.setHangulCellWidth(hangul_cell_w);
+}
+
 export fn matcha_editor_scroll(ed: ?*Editor, dx: f32, dy: f32) void {
     if (ed) |e| e.scroll(dx, dy);
 }
@@ -856,6 +864,7 @@ test "main_c: rect and hit test stay aligned for fullwidth characters" {
     defer ed.deinit();
 
     matcha_editor_set_viewport(&ed, 80, 20, 1, 1);
+    matcha_editor_set_wide_cell_width(&ed, 1.5);
     try ed.insertText("a好b");
 
     var x: f32 = 0;
@@ -863,10 +872,25 @@ test "main_c: rect and hit test stay aligned for fullwidth characters" {
     var w: f32 = 0;
     var h: f32 = 0;
     try testing.expect(matcha_editor_get_rect_for_offset(&ed, 4, &x, &y, &w, &h));
-    try testing.expectEqual(@as(f32, 3), x);
+    try testing.expectEqual(@as(f32, 2.5), x);
     try testing.expectEqual(@as(f32, 1), w);
     try testing.expectEqual(@as(f32, 1), h);
 
     try testing.expectEqual(@as(u32, 1), matcha_editor_hit_test_offset(&ed, 1.2, 0.5));
-    try testing.expectEqual(@as(u32, 4), matcha_editor_hit_test_offset(&ed, 2.8, 0.5));
+    try testing.expectEqual(@as(u32, 4), matcha_editor_hit_test_offset(&ed, 2.2, 0.5));
+}
+
+test "main_c: wrapped hit testing follows pixel-based row breaks" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    matcha_editor_set_viewport(&ed, 4, 10, 1, 1);
+    matcha_editor_set_wide_cell_width(&ed, 1.5);
+    try ed.insertText("a好bc");
+
+    try testing.expectEqual(@as(u32, 5), matcha_editor_hit_test_offset(&ed, 3.8, 0.5));
 }

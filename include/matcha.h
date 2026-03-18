@@ -155,6 +155,8 @@ bool matcha_editor_key_event(matcha_editor_t ed, matcha_input_key_s key);
 void matcha_editor_set_viewport(matcha_editor_t ed,
                                  uint32_t width_px, uint32_t height_px,
                                  float cell_width, float cell_height);
+void matcha_editor_set_wide_cell_width(matcha_editor_t ed, float wide_cell_width);
+void matcha_editor_set_hangul_cell_width(matcha_editor_t ed, float hangul_cell_width);
 void matcha_editor_scroll(matcha_editor_t ed, float dx, float dy);
 void matcha_editor_click(matcha_editor_t ed, float x, float y, bool extend);
 void matcha_editor_double_click(matcha_editor_t ed, float x, float y);
