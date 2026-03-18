@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var goToLineText = ""
 
     private var editor: MatchaEditor? { tabManager.activeEditor }
+    private var isKeyWindow: Bool { editor === MatchaEditor.activeEditor }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,33 +57,41 @@ struct ContentView: View {
             }
         }
         .background(Color(hex: 0x16181AFF))
-        // Tab notifications (not tied to a specific editor)
+        // Only handle notifications when this window is key (prevents cross-window routing)
         .onReceive(NotificationCenter.default.publisher(for: .matchaNewTab)) { _ in
+            guard isKeyWindow else { return }
             tabManager.newTab()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaCloseTab)) { _ in
+            guard isKeyWindow else { return }
             tabManager.closeCurrentTab()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaNextTab)) { _ in
+            guard isKeyWindow else { return }
             tabManager.selectNextTab()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaPrevTab)) { _ in
+            guard isKeyWindow else { return }
             tabManager.selectPreviousTab()
         }
-        // Editor notifications (use active editor)
         .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile)) { _ in
+            guard isKeyWindow else { return }
             editor?.newFile()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile)) { _ in
+            guard isKeyWindow else { return }
             openFile()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaSaveFile)) { _ in
+            guard isKeyWindow else { return }
             saveFile()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile)) { _ in
+            guard isKeyWindow else { return }
             saveAsFile()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind)) { _ in
+            guard isKeyWindow else { return }
             showFindBar.toggle()
             if showFindBar {
                 prefillSearchFromSelection()
@@ -91,6 +100,7 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext)) { _ in
+            guard isKeyWindow else { return }
             if !showFindBar {
                 showFindBar = true
                 prefillSearchFromSelection()
@@ -98,6 +108,7 @@ struct ContentView: View {
             findNext()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev)) { _ in
+            guard isKeyWindow else { return }
             if !showFindBar {
                 showFindBar = true
                 prefillSearchFromSelection()
@@ -105,6 +116,7 @@ struct ContentView: View {
             findPrev()
         }
         .onReceive(NotificationCenter.default.publisher(for: .matchaGoToLine)) { _ in
+            guard isKeyWindow else { return }
             goToLineText = ""
             showGoToLine = true
         }

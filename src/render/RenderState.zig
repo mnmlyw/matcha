@@ -4,7 +4,10 @@ const Cell = @import("Cell.zig");
 const Lexer = @import("../highlight/Lexer.zig");
 const Language = @import("../highlight/Language.zig").Language;
 const PieceTable = @import("../buffer/PieceTable.zig").PieceTable;
-const charWidth = @import("../buffer/UnicodeIterator.zig").charWidth;
+const UnicodeUtil = @import("../buffer/UnicodeIterator.zig");
+const charWidth = UnicodeUtil.charWidth;
+const nextClusterLen = UnicodeUtil.nextClusterLen;
+const CLUSTER_SENTINEL = UnicodeUtil.CLUSTER_SENTINEL;
 
 const CellList = std.ArrayListUnmanaged(Cell.RenderCell);
 const CursorList = std.ArrayListUnmanaged(Cell.RenderCursor);
@@ -96,6 +99,7 @@ pub const RenderState = struct {
     line_numbers: RectList,
     line_number_labels: LineNumberList,
     bracket_highlights: RectList,
+    cluster_strings: std.ArrayListUnmanaged(u8) = .{},
     line_state_cache: LineStateCache = .{},
     line_token_cache: LineTokenCache = .{},
     scratch_line: std.ArrayListUnmanaged(u8) = .{},
@@ -126,6 +130,7 @@ pub const RenderState = struct {
         self.line_numbers.deinit(self.allocator);
         self.line_number_labels.deinit(self.allocator);
         self.bracket_highlights.deinit(self.allocator);
+        self.cluster_strings.deinit(self.allocator);
         self.line_state_cache.deinit(self.allocator);
         self.line_token_cache.deinit(self.allocator);
         self.scratch_line.deinit(self.allocator);
@@ -148,6 +153,7 @@ pub const RenderState = struct {
         self.line_numbers.clearRetainingCapacity();
         self.line_number_labels.clearRetainingCapacity();
         self.bracket_highlights.clearRetainingCapacity();
+        self.cluster_strings.clearRetainingCapacity();
 
         const cell_w = editor.cell_width;
         const cell_h = if (editor.cell_height > 0) editor.cell_height else 16.0;
@@ -306,8 +312,19 @@ pub const RenderState = struct {
 
                 const cp_len = PieceTable.codepointByteLen(byte);
                 const codepoint = decodeCodepointFromSlice(line_data, col);
-                const cw: u32 = charWidth(codepoint);
-                const char_px_w = editor.pixelWidthForCodepoint(codepoint);
+                const cluster_len = nextClusterLen(line_data, col);
+                const is_cluster = cluster_len > cp_len;
+                const cw: u32 = if (is_cluster) 2 else charWidth(codepoint);
+                const char_px_w = if (is_cluster) editor.pixelWidthForCodepoint(codepoint) else editor.pixelWidthForCodepoint(codepoint);
+
+                // For multi-codepoint clusters, store bytes and encode as special glyph_index
+                var glyph_index: u32 = codepoint;
+                if (is_cluster) {
+                    const offset: u32 = @intCast(self.cluster_strings.items.len);
+                    self.cluster_strings.appendSlice(self.allocator, line_data[col .. col + cluster_len]) catch {};
+                    self.cluster_strings.append(self.allocator, 0) catch {}; // null terminator
+                    glyph_index = CLUSTER_SENTINEL + offset;
+                }
 
                 // Compute visual position
                 const seg = last_seg;
@@ -352,7 +369,7 @@ pub const RenderState = struct {
                         .h = cell_h,
                         .fg = fg_color,
                         .bg = bg_color,
-                        .glyph_index = codepoint,
+                        .glyph_index = glyph_index,
                         .style = 0,
                     }) catch {};
                 }
@@ -360,26 +377,26 @@ pub const RenderState = struct {
                 // Track spaces for word-boundary wrapping (after cell append)
                 if (byte == ' ' or byte == '\t') {
                     has_space_in_seg = true;
-                    last_space_col = col + cp_len;
+                    last_space_col = col + cluster_len;
                     last_space_vcol = vcol + cw;
                     cells_at_space = self.cells.items.len;
                 }
 
-                col += cp_len;
+                col += cluster_len;
                 vcol += cw;
                 seg_x_offset += char_px_w;
             }
 
-            // Trailing whitespace highlight
+            // Trailing whitespace highlight (skip if entire line is whitespace)
             if (content_len > 0) {
                 var trail_end: u32 = content_len;
                 while (trail_end > 0 and (line_data[trail_end - 1] == ' ' or line_data[trail_end - 1] == '\t')) {
                     trail_end -= 1;
                 }
-                if (trail_end < content_len) {
+                if (trail_end > 0 and trail_end < content_len) {
                     const trail_count = content_len - trail_end;
                     const trail_px_w = @as(f32, @floatFromInt(trail_count)) * cell_w;
-                    const trail_x = seg_x_offset - trail_px_w;
+                    const trail_x = @max(0, seg_x_offset - trail_px_w);
                     const trail_y = @as(f32, @floatFromInt(line_base_vrow + last_seg)) * cell_h - editor.scroll_y;
                     const trail_screen_x = if (wrap_enabled) trail_x + gutter_w else trail_x - editor.scroll_x + gutter_w;
                     if (trail_y + cell_h >= 0 and trail_y <= vp_h) {

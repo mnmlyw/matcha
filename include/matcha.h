@@ -187,6 +187,7 @@ uint32_t matcha_editor_replace_all_with_options(matcha_editor_t ed, const char* 
 
 // Bracket highlights
 const matcha_render_rect_s* matcha_editor_get_bracket_highlights(matcha_editor_t ed, uint32_t* count);
+const uint8_t* matcha_editor_get_cluster_data(matcha_editor_t ed, uint32_t* len);
 
 // Render
 void matcha_editor_prepare_render(matcha_editor_t ed);

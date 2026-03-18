@@ -1,0 +1,10 @@
+Hello 👋 World 🌍
+Emoji test: 🎉 🚀 ✨ 💡 🔥
+Mixed: code 💻 and text 📝
+Flags: 🇺🇸 🇯🇵 🇩🇪 🇫🇷 🇬🇧
+Numbers: 1️⃣ 2️⃣ 3️⃣
+Animals: 🐱 🐶 🦊 🐼
+Food: 🍎 🍕 🍣 🍵
+Family: 👨‍👩‍👧 👩‍💻
+Faces: 😀 😎 🤔 😱
+Skin tones: 👍🏻 👍🏽 👍🏿
