@@ -135,7 +135,14 @@ void matcha_editor_select_word_right(matcha_editor_t ed);
 // Clipboard
 /// Returns a malloc'd string the caller must free with matcha_free_string, or NULL if no selection.
 char* matcha_editor_get_selection_text(matcha_editor_t ed);
+char* matcha_editor_get_content(matcha_editor_t ed, uint32_t* len);
+bool matcha_editor_get_selection_offsets(matcha_editor_t ed, uint32_t* start, uint32_t* end);
+uint32_t matcha_editor_get_cursor_offset(matcha_editor_t ed);
 void matcha_editor_paste(matcha_editor_t ed, const char* text, uint32_t len);
+void matcha_editor_replace_range(matcha_editor_t ed, uint32_t start, uint32_t end,
+                                  const char* text, uint32_t len);
+void matcha_editor_set_cursor_offset(matcha_editor_t ed, uint32_t pos);
+void matcha_editor_set_selection_offsets(matcha_editor_t ed, uint32_t start, uint32_t end);
 
 // Undo/Redo
 void matcha_editor_undo(matcha_editor_t ed);
@@ -152,6 +159,9 @@ void matcha_editor_scroll(matcha_editor_t ed, float dx, float dy);
 void matcha_editor_click(matcha_editor_t ed, float x, float y, bool extend);
 void matcha_editor_double_click(matcha_editor_t ed, float x, float y);
 void matcha_editor_triple_click(matcha_editor_t ed, float x, float y);
+uint32_t matcha_editor_hit_test_offset(matcha_editor_t ed, float x, float y);
+bool matcha_editor_get_rect_for_offset(matcha_editor_t ed, uint32_t pos,
+                                        float* x, float* y, float* w, float* h);
 float matcha_editor_get_scroll_y(matcha_editor_t ed);
 
 // Find & Replace

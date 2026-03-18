@@ -196,11 +196,55 @@ class MatchaEditor: ObservableObject {
         return str
     }
 
+    func getContent() -> String? {
+        guard let h = handle else { return nil }
+        var len: UInt32 = 0
+        guard let ptr = matcha_editor_get_content(h, &len) else { return nil }
+        let utf8Ptr = UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self)
+        let buffer = UnsafeBufferPointer(start: utf8Ptr, count: Int(len))
+        let content = String(decoding: buffer, as: UTF8.self)
+        matcha_editor_free_string(ptr)
+        return content
+    }
+
+    func getSelectionOffsets() -> Range<UInt32>? {
+        guard let h = handle else { return nil }
+        var start: UInt32 = 0
+        var end: UInt32 = 0
+        guard matcha_editor_get_selection_offsets(h, &start, &end) else { return nil }
+        return start..<end
+    }
+
+    func getCursorOffset() -> UInt32 {
+        guard let h = handle else { return 0 }
+        return matcha_editor_get_cursor_offset(h)
+    }
+
     func paste(text: String) {
         guard let h = handle else { return }
         text.withCString { ptr in
             matcha_editor_paste(h, ptr, UInt32(text.utf8.count))
         }
+        updateInfo()
+    }
+
+    func replaceRange(start: UInt32, end: UInt32, text: String) {
+        guard let h = handle else { return }
+        text.withCString { ptr in
+            matcha_editor_replace_range(h, start, end, ptr, UInt32(text.utf8.count))
+        }
+        updateInfo()
+    }
+
+    func setCursorOffset(_ pos: UInt32) {
+        guard let h = handle else { return }
+        matcha_editor_set_cursor_offset(h, pos)
+        updateInfo()
+    }
+
+    func setSelectionOffsets(start: UInt32, end: UInt32) {
+        guard let h = handle else { return }
+        matcha_editor_set_selection_offsets(h, start, end)
         updateInfo()
     }
 
@@ -237,6 +281,21 @@ class MatchaEditor: ObservableObject {
         guard let h = handle else { return }
         matcha_editor_triple_click(h, x, y)
         updateInfo()
+    }
+
+    func hitTestOffset(x: Float, y: Float) -> UInt32 {
+        guard let h = handle else { return 0 }
+        return matcha_editor_hit_test_offset(h, x, y)
+    }
+
+    func rectForOffset(_ pos: UInt32) -> CGRect? {
+        guard let h = handle else { return nil }
+        var x: Float = 0
+        var y: Float = 0
+        var w: Float = 0
+        var hgt: Float = 0
+        guard matcha_editor_get_rect_for_offset(h, pos, &x, &y, &w, &hgt) else { return nil }
+        return CGRect(x: CGFloat(x), y: CGFloat(y), width: CGFloat(w), height: CGFloat(hgt))
     }
 
     func getScrollY() -> Float {

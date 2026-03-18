@@ -193,6 +193,52 @@ pub const Editor = struct {
         try self.insertTextWithOptions(text, false);
     }
 
+    pub fn cursorPos(self: *const Editor) u32 {
+        return self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+    }
+
+    pub fn selectionPosRange(self: *const Editor) ?struct { start: u32, end: u32 } {
+        if (!self.selection.active) return null;
+        const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+        return .{
+            .start = self.buffer.lineColToPos(range.start_line, range.start_col),
+            .end = self.buffer.lineColToPos(range.end_line, range.end_col),
+        };
+    }
+
+    pub fn setCursorPos(self: *Editor, pos: u32) void {
+        const clamped = @min(pos, self.buffer.totalLength());
+        const lc = self.buffer.posToLineCol(clamped);
+        self.selection.clear();
+        self.cursor.moveTo(lc.line, lc.col);
+        self.cursor.target_col = self.cursor.col;
+        self.ensureCursorVisible();
+    }
+
+    pub fn setSelectionPosRange(self: *Editor, start_pos: u32, end_pos: u32) void {
+        const total = self.buffer.totalLength();
+        const start = @min(start_pos, total);
+        const end = @min(end_pos, total);
+        if (start >= end) {
+            self.setCursorPos(start);
+            return;
+        }
+
+        const start_lc = self.buffer.posToLineCol(start);
+        const end_lc = self.buffer.posToLineCol(end);
+        self.selection.setAnchor(start_lc.line, start_lc.col);
+        self.cursor.moveTo(end_lc.line, end_lc.col);
+        self.cursor.target_col = self.cursor.col;
+        self.ensureCursorVisible();
+    }
+
+    pub fn replaceRangeLiteral(self: *Editor, start_pos: u32, end_pos: u32, text: []const u8) !void {
+        const start = @min(start_pos, end_pos);
+        const end = @max(start_pos, end_pos);
+        self.setSelectionPosRange(start, end);
+        try self.insertTextLiteral(text);
+    }
+
     fn insertTextWithOptions(self: *Editor, text: []const u8, allow_auto_pair: bool) !void {
         if (allow_auto_pair and try self.handleAutoPair(text)) return;
 
@@ -1059,6 +1105,11 @@ pub const Editor = struct {
         self.clampCursorCol();
     }
 
+    pub fn screenToPos(self: *Editor, x: f32, y: f32) u32 {
+        const lc = self.screenToLineCol(x, y);
+        return self.buffer.lineColToPos(lc.line, lc.col);
+    }
+
     // ── Multi-click ─────────────────────────────────────────────
 
     pub fn doubleClick(self: *Editor, x: f32, y: f32) void {
@@ -1560,6 +1611,26 @@ pub const Editor = struct {
 
         const segment = vrow -| sums[lo];
         return .{ .line = lo, .col_offset = segment * self.wrapCol() };
+    }
+
+    pub fn rectForPos(self: *Editor, pos: u32) Cell.RenderRect {
+        const clamped = @min(pos, self.buffer.totalLength());
+        const lc = self.buffer.posToLineCol(clamped);
+        const wrap_enabled = self.config.wrap_lines;
+        const wrap_col = self.wrapCol();
+        const gutter_w = self.gutterWidth();
+        const vcol = self.byteColToVisualCol(lc.line, lc.col);
+        const base_vrow = if (wrap_enabled) self.lineToVisualRow(lc.line) else lc.line;
+        const seg: u32 = if (wrap_enabled and wrap_col > 0) vcol / wrap_col else 0;
+        const seg_col: u32 = if (wrap_enabled and wrap_col > 0) vcol % wrap_col else vcol;
+        return .{
+            .x = @as(f32, @floatFromInt(seg_col)) * self.cell_width + gutter_w -
+                if (!wrap_enabled) self.scroll_x else @as(f32, 0),
+            .y = @as(f32, @floatFromInt(base_vrow + seg)) * self.cell_height - self.scroll_y,
+            .w = self.cell_width,
+            .h = self.cell_height,
+            .color = self.config.cursor_color,
+        };
     }
 
     const LineRange = struct {
@@ -2425,4 +2496,21 @@ test "Editor: non-wrapped horizontal scroll uses full line width" {
     ed.scroll(100, 0);
 
     try testing.expectEqual(@as(f32, 6), ed.scroll_x);
+}
+
+test "Editor: click maps fullwidth characters on cell boundaries" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(80, 20, 1, 1);
+    try ed.insertText("a好b");
+
+    ed.click(1.2, 0.5, false);
+    try testing.expectEqual(@as(u32, 1), ed.cursor.col);
+
+    ed.click(2.8, 0.5, false);
+    try testing.expectEqual(@as(u32, 4), ed.cursor.col);
 }

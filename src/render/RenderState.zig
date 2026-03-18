@@ -259,10 +259,8 @@ pub const RenderState = struct {
             // Iterate characters with UTF-8 and wrapping
             var col: u32 = 0; // byte offset within line
             var vcol: u32 = 0; // visual column (grid units, CJK = 2)
-            var seg_x_offset: f32 = 0; // pixel offset within current wrap segment
+            var seg_x_offset: f32 = 0; // point offset within current wrap segment
             var last_seg: u32 = 0;
-            // CJK characters use font_size as visual width instead of cell_w * 2
-            const wide_cell_w: f32 = @max(cell_w, @as(f32, @floatCast(config.font_size)));
 
             // Render line number on first visual row
             const line_base_vrow = current_vrow;
@@ -294,7 +292,7 @@ pub const RenderState = struct {
                 const cp_len = PieceTable.codepointByteLen(byte);
                 const codepoint = decodeCodepointFromSlice(line_data, col);
                 const cw: u32 = charWidth(codepoint);
-                const char_px_w: f32 = if (cw > 1) wide_cell_w else cell_w;
+                const char_px_w: f32 = @as(f32, @floatFromInt(cw)) * cell_w;
 
                 // Compute visual position
                 const seg: u32 = if (wrap_enabled) vcol / wrap_col else 0;
@@ -585,4 +583,26 @@ test "RenderState: highlight tokens are reused across redraws without edits" {
     const second_tokens = ed.render_state.line_token_cache.entries.items[0].tokens;
     try testing.expectEqual(first_tokens.ptr, second_tokens.ptr);
     try testing.expectEqual(first_tokens.len, second_tokens.len);
+}
+
+test "RenderState: fullwidth cells stay aligned with the cursor grid" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = false;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(80, 20, 1, 1);
+    try ed.insertText("a好b");
+    ed.cursor.moveTo(0, 4);
+
+    ed.prepareRender();
+
+    try testing.expectEqual(@as(usize, 3), ed.render_state.cells.items.len);
+    try testing.expectEqual(@as(f32, 0), ed.render_state.cells.items[0].x);
+    try testing.expectEqual(@as(f32, 1), ed.render_state.cells.items[1].x);
+    try testing.expectEqual(@as(f32, 2), ed.render_state.cells.items[1].w);
+    try testing.expectEqual(@as(f32, 3), ed.render_state.cells.items[2].x);
+    try testing.expectEqual(@as(f32, 3), ed.render_state.cursors.items[0].x);
 }
