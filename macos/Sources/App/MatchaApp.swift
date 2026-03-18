@@ -70,6 +70,14 @@ struct MatchaApp: App {
                     MatchaEditor.activeEditor?.moveLineDown()
                 }
                 .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+
+                Divider()
+
+                Button("Go to Line...") {
+                    guard let editor = MatchaEditor.activeEditor else { return }
+                    NotificationCenter.default.post(name: .matchaGoToLine, object: editor)
+                }
+                .keyboardShortcut("l", modifiers: .command)
             }
         }
     }
@@ -117,4 +125,5 @@ extension Notification.Name {
     static let matchaToggleFind = Notification.Name("matchaToggleFind")
     static let matchaFindNext = Notification.Name("matchaFindNext")
     static let matchaFindPrev = Notification.Name("matchaFindPrev")
+    static let matchaGoToLine = Notification.Name("matchaGoToLine")
 }

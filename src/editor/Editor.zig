@@ -867,6 +867,14 @@ pub const Editor = struct {
         self.ensureCursorVisible();
     }
 
+    pub fn goToLine(self: *Editor, target_line: u32) void {
+        const max_line = self.buffer.lineCount() -| 1;
+        const line = @min(target_line, max_line);
+        self.selection.clear();
+        self.cursor.moveTo(line, 0);
+        self.ensureCursorVisible();
+    }
+
     pub fn movePageUp(self: *Editor) void {
         self.selection.clear();
         const page_lines = self.visibleLines();

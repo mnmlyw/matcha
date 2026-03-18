@@ -167,6 +167,7 @@ class MatchaEditor: ObservableObject {
     func moveLineEnd() { guard let h = handle else { return }; matcha_editor_move_line_end(h); updateInfo() }
     func moveStart() { guard let h = handle else { return }; matcha_editor_move_start(h); updateInfo() }
     func moveEnd() { guard let h = handle else { return }; matcha_editor_move_end(h); updateInfo() }
+    func goToLine(_ line: UInt32) { guard let h = handle else { return }; matcha_editor_go_to_line(h, line); updateInfo() }
     func movePageUp() { guard let h = handle else { return }; matcha_editor_move_page_up(h); updateInfo() }
     func movePageDown() { guard let h = handle else { return }; matcha_editor_move_page_down(h); updateInfo() }
     func moveWordLeft() { guard let h = handle else { return }; matcha_editor_move_word_left(h); updateInfo() }

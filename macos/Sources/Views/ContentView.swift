@@ -10,6 +10,8 @@ struct ContentView: View {
     @State private var replaceText = ""
     @State private var caseSensitive = true
     @State private var wholeWord = false
+    @State private var showGoToLine = false
+    @State private var goToLineText = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,8 +29,18 @@ struct ContentView: View {
                             onReplaceAll: replaceAll)
             }
 
-            EditorView(editor: editorState.editor)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ZStack(alignment: .top) {
+                EditorView(editor: editorState.editor)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if showGoToLine {
+                    GoToLineView(text: $goToLineText, isVisible: $showGoToLine) { lineNum in
+                        editorState.editor.goToLine(UInt32(lineNum))
+                    }
+                    .padding(.top, 40)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
 
             StatusBarView(editor: editorState.editor)
         }
@@ -66,6 +78,10 @@ struct ContentView: View {
                 prefillSearchFromSelection()
             }
             findPrev()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .matchaGoToLine, object: editorState.editor)) { _ in
+            goToLineText = ""
+            showGoToLine = true
         }
         .onAppear {
             editorState.editor.markActive()

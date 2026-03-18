@@ -114,6 +114,7 @@ void matcha_editor_move_line_start(matcha_editor_t ed);
 void matcha_editor_move_line_end(matcha_editor_t ed);
 void matcha_editor_move_start(matcha_editor_t ed);
 void matcha_editor_move_end(matcha_editor_t ed);
+void matcha_editor_go_to_line(matcha_editor_t ed, uint32_t line);  // 1-based
 void matcha_editor_move_page_up(matcha_editor_t ed);
 void matcha_editor_move_page_down(matcha_editor_t ed);
 void matcha_editor_move_word_left(matcha_editor_t ed);
