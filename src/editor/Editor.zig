@@ -1092,12 +1092,10 @@ pub const Editor = struct {
     }
 
     fn clampScroll(self: *Editor) void {
-        const view_h = @as(f32, @floatFromInt(self.viewport_height));
-
-        // Vertical: use visual rows when wrapping
+        // Vertical: allow scrolling past end so the last line can reach the top
         const total_vrows = if (self.config.wrap_lines) self.totalVisualRows() else self.buffer.lineCount();
         const total_h = @as(f32, @floatFromInt(total_vrows)) * self.cell_height;
-        const max_scroll_y = @max(0, total_h - view_h);
+        const max_scroll_y = @max(0, total_h - self.cell_height);
         self.scroll_y = @min(self.scroll_y, max_scroll_y);
 
         // Horizontal: disabled when wrapping
