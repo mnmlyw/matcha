@@ -393,6 +393,20 @@ pub const RenderState = struct {
         editor.max_visible_line_len = max_line_len;
         editor.max_visible_line_width = max_line_width;
 
+        // Current line highlight
+        {
+            const hl_y = @as(f32, @floatFromInt(cursor_base_vrow)) * cell_h - editor.scroll_y;
+            if (hl_y + cell_h >= 0 and hl_y <= vp_h) {
+                self.selections.append(self.allocator, .{
+                    .x = gutter_w,
+                    .y = hl_y,
+                    .w = vp_w - gutter_w,
+                    .h = cell_h,
+                    .color = config.current_line_color,
+                }) catch {};
+            }
+        }
+
         // Cursor
         const cursor_metrics = editor.byteColToPixelMetrics(editor.cursor.line, editor.cursor.col);
         const cursor_x = (if (wrap_enabled) cursor_metrics.segment_x else cursor_metrics.total_x) + gutter_w -
