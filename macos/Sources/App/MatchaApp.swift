@@ -14,36 +14,41 @@ struct MatchaApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New") {
                     if NSApp.windows.contains(where: { $0.isVisible }) {
-                        guard let editor = MatchaEditor.activeEditor else { return }
-                        NotificationCenter.default.post(name: .matchaNewFile, object: editor)
+                        NotificationCenter.default.post(name: .matchaNewFile, object: nil)
                     } else {
-                        // No window open — create one via SwiftUI's built-in action
                         NSApp.sendAction(#selector(AppDelegate.newWindowAction), to: nil, from: nil)
                     }
                 }
                 .keyboardShortcut("n", modifiers: .command)
 
+                Button("New Tab") {
+                    NotificationCenter.default.post(name: .matchaNewTab, object: nil)
+                }
+                .keyboardShortcut("t", modifiers: .command)
+
                 Button("Open...") {
                     if !NSApp.windows.contains(where: { $0.isVisible }) {
                         NSApp.sendAction(#selector(AppDelegate.openFileAction), to: nil, from: nil)
                     } else {
-                        guard let editor = MatchaEditor.activeEditor else { return }
-                        NotificationCenter.default.post(name: .matchaOpenFile, object: editor)
+                        NotificationCenter.default.post(name: .matchaOpenFile, object: nil)
                     }
                 }
                 .keyboardShortcut("o", modifiers: .command)
 
+                Button("Close Tab") {
+                    NotificationCenter.default.post(name: .matchaCloseTab, object: nil)
+                }
+                .keyboardShortcut("w", modifiers: .command)
+
                 Divider()
 
                 Button("Save") {
-                    guard let editor = MatchaEditor.activeEditor else { return }
-                    NotificationCenter.default.post(name: .matchaSaveFile, object: editor)
+                    NotificationCenter.default.post(name: .matchaSaveFile, object: nil)
                 }
                 .keyboardShortcut("s", modifiers: .command)
 
                 Button("Save As...") {
-                    guard let editor = MatchaEditor.activeEditor else { return }
-                    NotificationCenter.default.post(name: .matchaSaveAsFile, object: editor)
+                    NotificationCenter.default.post(name: .matchaSaveAsFile, object: nil)
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
             }
@@ -74,10 +79,21 @@ struct MatchaApp: App {
                 Divider()
 
                 Button("Go to Line...") {
-                    guard let editor = MatchaEditor.activeEditor else { return }
-                    NotificationCenter.default.post(name: .matchaGoToLine, object: editor)
+                    NotificationCenter.default.post(name: .matchaGoToLine, object: nil)
                 }
                 .keyboardShortcut("l", modifiers: .command)
+
+                Divider()
+
+                Button("Next Tab") {
+                    NotificationCenter.default.post(name: .matchaNextTab, object: nil)
+                }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+
+                Button("Previous Tab") {
+                    NotificationCenter.default.post(name: .matchaPrevTab, object: nil)
+                }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
             }
         }
     }
@@ -98,14 +114,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func newWindowAction() {
-        // Ask SwiftUI to open a new WindowGroup window
         if #available(macOS 13.0, *) {
             NSApp.sendAction(#selector(NSResponder.newWindowForTab(_:)), to: nil, from: nil)
         }
     }
 
     @objc func openFileAction() {
-        // Show file dialog first, then open the file in a new window
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -119,6 +133,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension Notification.Name {
     static let matchaNewFile = Notification.Name("matchaNewFile")
+    static let matchaNewTab = Notification.Name("matchaNewTab")
+    static let matchaCloseTab = Notification.Name("matchaCloseTab")
+    static let matchaNextTab = Notification.Name("matchaNextTab")
+    static let matchaPrevTab = Notification.Name("matchaPrevTab")
     static let matchaOpenFile = Notification.Name("matchaOpenFile")
     static let matchaSaveFile = Notification.Name("matchaSaveFile")
     static let matchaSaveAsFile = Notification.Name("matchaSaveAsFile")

@@ -3,7 +3,7 @@ import SwiftUI
 struct ContentView: View {
     private static var didHandleLaunchFile = false
 
-    @StateObject private var editorState = EditorState()
+    @StateObject private var tabManager = TabManager()
     @State private var showFindBar = false
     @State private var showReplace = false
     @State private var searchText = ""
@@ -13,10 +13,16 @@ struct ContentView: View {
     @State private var showGoToLine = false
     @State private var goToLineText = ""
 
+    private var editor: MatchaEditor? { tabManager.activeEditor }
+
     var body: some View {
         VStack(spacing: 0) {
-            if showFindBar {
-                FindBarView(editor: editorState.editor,
+            if tabManager.tabs.count > 1 {
+                TabBarView(tabManager: tabManager)
+            }
+
+            if showFindBar, let ed = editor {
+                FindBarView(editor: ed,
                             isVisible: $showFindBar,
                             showReplace: $showReplace,
                             searchText: $searchText,
@@ -30,34 +36,53 @@ struct ContentView: View {
             }
 
             ZStack(alignment: .top) {
-                EditorView(editor: editorState.editor)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let ed = editor {
+                    EditorView(editor: ed)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .id(tabManager.activeTab?.id)
+                }
 
                 if showGoToLine {
                     GoToLineView(text: $goToLineText, isVisible: $showGoToLine) { lineNum in
-                        editorState.editor.goToLine(UInt32(lineNum))
+                        editor?.goToLine(UInt32(lineNum))
                     }
                     .padding(.top, 40)
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
 
-            StatusBarView(editor: editorState.editor)
+            if let ed = editor {
+                StatusBarView(editor: ed)
+            }
         }
         .background(Color(hex: 0x16181AFF))
-        .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile, object: editorState.editor)) { _ in
-            editorState.editor.newFile()
+        // Tab notifications (not tied to a specific editor)
+        .onReceive(NotificationCenter.default.publisher(for: .matchaNewTab)) { _ in
+            tabManager.newTab()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile, object: editorState.editor)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaCloseTab)) { _ in
+            tabManager.closeCurrentTab()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .matchaNextTab)) { _ in
+            tabManager.selectNextTab()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .matchaPrevTab)) { _ in
+            tabManager.selectPreviousTab()
+        }
+        // Editor notifications (use active editor)
+        .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile)) { _ in
+            editor?.newFile()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile)) { _ in
             openFile()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveFile, object: editorState.editor)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveFile)) { _ in
             saveFile()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile, object: editorState.editor)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile)) { _ in
             saveAsFile()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind, object: editorState.editor)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind)) { _ in
             showFindBar.toggle()
             if showFindBar {
                 prefillSearchFromSelection()
@@ -65,31 +90,31 @@ struct ContentView: View {
                 showReplace = false
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext, object: editorState.editor)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext)) { _ in
             if !showFindBar {
                 showFindBar = true
                 prefillSearchFromSelection()
             }
             findNext()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev, object: editorState.editor)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev)) { _ in
             if !showFindBar {
                 showFindBar = true
                 prefillSearchFromSelection()
             }
             findPrev()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaGoToLine, object: editorState.editor)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .matchaGoToLine)) { _ in
             goToLineText = ""
             showGoToLine = true
         }
         .onAppear {
-            editorState.editor.markActive()
+            editor?.markActive()
 
             // Handle pending file from "Open..." menu when no window was open
             if let path = AppDelegate.pendingFilePath {
                 AppDelegate.pendingFilePath = nil
-                _ = editorState.editor.openFile(path: path)
+                tabManager.openInCurrentTab(path: path)
                 return
             }
 
@@ -100,7 +125,7 @@ struct ContentView: View {
                 let path = arg.hasPrefix("/") ? arg
                     : FileManager.default.currentDirectoryPath + "/" + arg
                 if FileManager.default.fileExists(atPath: path) {
-                    _ = editorState.editor.openFile(path: path)
+                    tabManager.openInCurrentTab(path: path)
                     break
                 }
             }
@@ -114,28 +139,35 @@ struct ContentView: View {
         panel.canChooseFiles = true
 
         if panel.runModal() == .OK, let url = panel.url {
-            _ = editorState.editor.openFile(path: url.path)
+            // If current tab is untitled and unmodified, open in it; otherwise new tab
+            if let ed = editor, ed.info.filename == nil && !ed.info.modified {
+                tabManager.openInCurrentTab(path: url.path)
+            } else {
+                tabManager.openInNewTab(path: url.path)
+            }
         }
     }
 
     private func saveFile() {
-        if editorState.editor.info.filename != nil {
-            _ = editorState.editor.save()
+        guard let ed = editor else { return }
+        if ed.info.filename != nil {
+            _ = ed.save()
         } else {
             saveAsFile()
         }
     }
 
     private func saveAsFile() {
+        guard let ed = editor else { return }
         let panel = NSSavePanel()
         if panel.runModal() == .OK, let url = panel.url {
-            _ = editorState.editor.saveAs(path: url.path)
+            _ = ed.saveAs(path: url.path)
         }
     }
 
     private func prefillSearchFromSelection() {
         guard searchText.isEmpty,
-              let sel = editorState.editor.getSelectionText(),
+              let sel = editor?.getSelectionText(),
               !sel.isEmpty,
               !sel.contains("\n")
         else { return }
@@ -144,44 +176,32 @@ struct ContentView: View {
 
     private func findNext() {
         guard !searchText.isEmpty else { return }
-        _ = editorState.editor.findNext(query: searchText,
-                                        caseSensitive: caseSensitive,
-                                        wholeWord: wholeWord)
+        _ = editor?.findNext(query: searchText,
+                             caseSensitive: caseSensitive,
+                             wholeWord: wholeWord)
     }
 
     private func findPrev() {
         guard !searchText.isEmpty else { return }
-        _ = editorState.editor.findPrev(query: searchText,
-                                        caseSensitive: caseSensitive,
-                                        wholeWord: wholeWord)
+        _ = editor?.findPrev(query: searchText,
+                             caseSensitive: caseSensitive,
+                             wholeWord: wholeWord)
     }
 
     private func replaceNext() {
         guard !searchText.isEmpty else { return }
-        _ = editorState.editor.replaceNext(query: searchText,
-                                           replacement: replaceText,
-                                           caseSensitive: caseSensitive,
-                                           wholeWord: wholeWord)
+        _ = editor?.replaceNext(query: searchText,
+                                replacement: replaceText,
+                                caseSensitive: caseSensitive,
+                                wholeWord: wholeWord)
     }
 
     private func replaceAll() {
         guard !searchText.isEmpty else { return }
-        _ = editorState.editor.replaceAll(query: searchText,
-                                          replacement: replaceText,
-                                          caseSensitive: caseSensitive,
-                                          wholeWord: wholeWord)
-    }
-}
-
-/// Holds config + editor together so they share a lifetime.
-class EditorState: ObservableObject {
-    let config: MatchaConfig
-    let editor: MatchaEditor
-
-    init() {
-        let cfg = MatchaConfig()
-        self.config = cfg
-        self.editor = MatchaEditor(config: cfg)
+        _ = editor?.replaceAll(query: searchText,
+                               replacement: replaceText,
+                               caseSensitive: caseSensitive,
+                               wholeWord: wholeWord)
     }
 }
 
