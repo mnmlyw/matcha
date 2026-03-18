@@ -23,6 +23,7 @@ pub const Config = struct {
     gutter_fg_color: u32 = 0x7B8496FF, // grey
     gutter_bg_color: u32 = 0x16181AFF, // bg (same as text bg)
     line_number_color: u32 = 0x7B8496FF, // grey
+    current_line_number_color: u32 = 0xFFFFFFFF, // bright white for active line number
 
     // Syntax theme
     theme: Theme = .{},

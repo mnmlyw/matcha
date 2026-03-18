@@ -275,16 +275,30 @@ pub const RenderState = struct {
                         .y = y0,
                         .w = gutter_w,
                         .h = cell_h,
-                        .color = config.line_number_color,
+                        .color = if (line == editor.cursor.line) config.current_line_number_color else config.line_number_color,
                         .line = line + 1,
                     }) catch {};
                 }
             }
 
+            // Word-boundary wrap state: track last space so we can break there
+            var last_space_col: u32 = 0;
+            var last_space_vcol: u32 = 0;
+            var cells_at_space: usize = 0;
+            var has_space_in_seg = false;
+
             while (col < content_len) {
+                // Check if we need to wrap
                 if (wrap_enabled and seg_x_offset >= wrap_width and seg_x_offset > 0) {
-                    last_seg += 1;
+                    if (has_space_in_seg) {
+                        // Truncate cells emitted after the last space, rewind to that point
+                        self.cells.shrinkRetainingCapacity(cells_at_space);
+                        col = last_space_col;
+                        vcol = last_space_vcol;
+                    }
                     seg_x_offset = 0;
+                    last_seg += 1;
+                    has_space_in_seg = false;
                 }
 
                 const byte = line_data[col];
@@ -341,6 +355,14 @@ pub const RenderState = struct {
                         .glyph_index = codepoint,
                         .style = 0,
                     }) catch {};
+                }
+
+                // Track spaces for word-boundary wrapping (after cell append)
+                if (byte == ' ' or byte == '\t') {
+                    has_space_in_seg = true;
+                    last_space_col = col + cp_len;
+                    last_space_vcol = vcol + cw;
+                    cells_at_space = self.cells.items.len;
                 }
 
                 col += cp_len;

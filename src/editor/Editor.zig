@@ -1540,24 +1540,77 @@ pub const Editor = struct {
         const line_end = self.buffer.lineEnd(line);
         const line_len = line_end - line_start;
         const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
-        var pos: u32 = 0;
+
+        // Two-pass approach for word-boundary wrapping:
+        // Pass 1: find all wrap break points for this line (up to byte_col)
+        // Pass 2: compute segment_x for byte_col
+
+        // Find wrap break points by simulating the render loop
+        var break_positions: [256]u32 = undefined; // byte positions where new segments start
+        var num_breaks: u32 = 0;
+
+        if (wrap_width > 0) {
+            var scan_pos: u32 = 0;
+            var scan_x: f32 = 0;
+            var scan_last_space: u32 = 0;
+            var scan_has_space = false;
+
+            while (scan_pos < line_len) {
+                if (scan_x >= wrap_width and scan_x > 0) {
+                    if (scan_has_space) {
+                        if (num_breaks < 256) {
+                            break_positions[num_breaks] = scan_last_space;
+                            num_breaks += 1;
+                        }
+                        scan_pos = scan_last_space;
+                        scan_x = 0;
+                        scan_has_space = false;
+                        continue;
+                    } else {
+                        if (num_breaks < 256) {
+                            break_positions[num_breaks] = scan_pos;
+                            num_breaks += 1;
+                        }
+                        scan_x = 0;
+                        scan_has_space = false;
+                    }
+                }
+                const b = self.buffer.byteAt(line_start + scan_pos) orelse break;
+                if (b == '\n') break;
+                const cp = self.buffer.codepointAt(line_start + scan_pos);
+                const cp_len = PieceTable.codepointByteLen(b);
+                const px_w = self.pixelWidthForCodepoint(cp);
+
+                if (b == ' ' or b == '\t') {
+                    scan_has_space = true;
+                    scan_last_space = scan_pos + cp_len;
+                }
+
+                scan_pos += cp_len;
+                scan_x += px_w;
+            }
+        }
+
+        // Now compute segment and segment_x for byte_col
         var segment: u32 = 0;
+        var seg_start: u32 = 0; // byte offset where current segment starts
+        while (segment < num_breaks and break_positions[segment] <= byte_col) {
+            seg_start = break_positions[segment];
+            segment += 1;
+        }
+
+        // Measure pixel width from seg_start to byte_col
         var segment_x: f32 = 0;
         var total_x: f32 = 0;
-
+        var pos: u32 = 0;
         while (pos < byte_col and pos < line_len) {
-            if (wrap_width > 0 and segment_x >= wrap_width and segment_x > 0) {
-                segment += 1;
-                segment_x = 0;
-            }
             const b = self.buffer.byteAt(line_start + pos) orelse break;
             if (b == '\n') break;
             const cp = self.buffer.codepointAt(line_start + pos);
-            const char_px_w = self.pixelWidthForCodepoint(cp);
-
+            const px_w = self.pixelWidthForCodepoint(cp);
+            total_x += px_w;
+            if (pos >= seg_start) segment_x += px_w;
             pos += PieceTable.codepointByteLen(b);
-            total_x += char_px_w;
-            segment_x += char_px_w;
         }
 
         return .{
@@ -1577,14 +1630,27 @@ pub const Editor = struct {
         var pos: u32 = 0;
         var segment: u32 = 0;
         var segment_x: f32 = 0;
+        // Word-boundary wrap tracking
+        var has_space = false;
+        var last_space_pos: u32 = 0;
 
         while (pos < line_len) {
             if (wrap_width > 0 and segment_x >= wrap_width and segment_x > 0) {
-                if (target_segment) |target| {
-                    if (segment == target) return pos;
+                if (has_space) {
+                    // If we're past the target segment already, return last position
+                    if (target_segment) |target| {
+                        if (segment == target) return last_space_pos;
+                    }
+                    pos = last_space_pos;
+                    segment_x = 0;
+                    has_space = false;
+                } else {
+                    if (target_segment) |target| {
+                        if (segment == target) return pos;
+                    }
+                    segment_x = 0;
                 }
                 segment += 1;
-                segment_x = 0;
             }
             const b = self.buffer.byteAt(line_start + pos) orelse break;
             if (b == '\n') break;
@@ -1592,6 +1658,11 @@ pub const Editor = struct {
             const cw = charWidth(cp);
             const cp_len = PieceTable.codepointByteLen(b);
             const char_px_w = self.pixelWidthForCodepoint(cp);
+
+            if (b == ' ' or b == '\t') {
+                has_space = true;
+                last_space_pos = pos + cp_len;
+            }
 
             if (target_segment == null or segment == target_segment.?) {
                 if (target_x < segment_x + char_px_w) {
@@ -1668,7 +1739,6 @@ pub const Editor = struct {
         self.wrap_prefix_sums.ensureTotalCapacity(self.allocator, line_count + 1) catch return;
 
         if (!self.config.wrap_lines or wrap_width <= 0) {
-            // No wrapping: visual row i = line i
             var i: u32 = 0;
             while (i <= line_count) : (i += 1) {
                 self.wrap_prefix_sums.appendAssumeCapacity(i);
@@ -1676,39 +1746,45 @@ pub const Editor = struct {
         } else {
             self.wrap_prefix_sums.appendAssumeCapacity(0);
             var running: u32 = 0;
-            var line_rows: u32 = 1;
-            var segment_x: f32 = 0;
 
-            var abs_pos: u32 = 0;
-            var pi: usize = 0;
-            while (pi < self.buffer.pieceCount()) : (pi += 1) {
-                const slice = self.buffer.pieceBytes(pi);
-                for (slice) |b| {
-                    if (b == '\n') {
-                        running += line_rows;
-                        self.wrap_prefix_sums.append(self.allocator, running) catch return;
-                        line_rows = 1;
-                        segment_x = 0;
-                    } else if (b < 0x80) {
-                        if (segment_x >= wrap_width and segment_x > 0) {
-                            line_rows += 1;
-                            segment_x = 0;
+            var line: u32 = 0;
+            while (line < line_count) : (line += 1) {
+                // Count visual rows for this line using word-boundary-aware wrapping
+                const line_start = self.buffer.lineStart(line);
+                const line_end = self.buffer.lineEnd(line);
+                const line_len = line_end - line_start;
+                var line_rows: u32 = 1;
+                var seg_x: f32 = 0;
+                var has_space = false;
+                var last_space_pos: u32 = 0;
+                var pos: u32 = 0;
+
+                while (pos < line_len) {
+                    if (seg_x >= wrap_width and seg_x > 0) {
+                        if (has_space) {
+                            pos = last_space_pos;
+                            seg_x = 0;
+                            has_space = false;
+                        } else {
+                            seg_x = 0;
                         }
-                        segment_x += self.cell_width;
-                    } else if (b >= 0xC0) {
-                        if (segment_x >= wrap_width and segment_x > 0) {
-                            line_rows += 1;
-                            segment_x = 0;
-                        }
-                        const cp = self.buffer.codepointAt(abs_pos);
-                        segment_x += self.pixelWidthForCodepoint(cp);
+                        line_rows += 1;
                     }
-                    // else: continuation byte, skip
-                    abs_pos += 1;
+                    const b = self.buffer.byteAt(line_start + pos) orelse break;
+                    if (b == '\n') break;
+                    const cp = self.buffer.codepointAt(line_start + pos);
+                    const cp_len = PieceTable.codepointByteLen(b);
+                    const px_w = self.pixelWidthForCodepoint(cp);
+
+                    if (b == ' ' or b == '\t') {
+                        has_space = true;
+                        last_space_pos = pos + cp_len;
+                    }
+
+                    pos += cp_len;
+                    seg_x += px_w;
                 }
-            }
-            // Last line (no trailing newline)
-            if (self.wrap_prefix_sums.items.len <= line_count) {
+
                 running += line_rows;
                 self.wrap_prefix_sums.append(self.allocator, running) catch return;
             }
