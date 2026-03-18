@@ -433,6 +433,15 @@ class MatchaEditor: ObservableObject {
         return UnsafeBufferPointer(start: ptr, count: Int(count))
     }
 
+    func getClusterData() -> UnsafeBufferPointer<UInt8> {
+        guard let h = handle else { return UnsafeBufferPointer(start: nil, count: 0) }
+        var len: UInt32 = 0
+        guard let ptr = matcha_editor_get_cluster_data(h, &len) else {
+            return UnsafeBufferPointer(start: nil, count: 0)
+        }
+        return UnsafeBufferPointer(start: ptr, count: Int(len))
+    }
+
     // MARK: - Info
 
     func updateInfo() {

@@ -646,6 +646,14 @@ export fn matcha_editor_get_bracket_highlights(ed: ?*Editor, count: ?*u32) ?[*]c
     return items.ptr;
 }
 
+export fn matcha_editor_get_cluster_data(ed: ?*Editor, len: ?*u32) ?[*]const u8 {
+    const e = ed orelse return null;
+    const items = e.render_state.cluster_strings.items;
+    if (len) |l| l.* = @intCast(items.len);
+    if (items.len == 0) return null;
+    return items.ptr;
+}
+
 // ── Viewport ───────────────────────────────────────────────────
 
 export fn matcha_editor_set_viewport(ed: ?*Editor, width: u32, height: u32, cell_w: f32, cell_h: f32) void {

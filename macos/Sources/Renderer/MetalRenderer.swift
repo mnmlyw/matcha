@@ -158,6 +158,7 @@ class MetalRenderer {
         let gutterRows = editor.getGutterRows()
         let lineNumberLabels = editor.getLineNumberLabels()
         let bracketHighlights = editor.getBracketHighlights()
+        let clusterData = editor.getClusterData()
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
 
@@ -203,14 +204,13 @@ class MetalRenderer {
             let codepoint = cell.glyph_index
             if codepoint <= 32 { continue }
 
-            let uv = ensureGlyph(codepoint: codepoint)
+            let uv = ensureGlyph(codepoint: codepoint, clusterData: clusterData)
             if uv.glyphWidth <= 0 { continue }
 
             let glyphX = cell.x + uv.bearingX
             let glyphY = cell.y + ascender - uv.bearingY
 
             if uv.isColor {
-                // Color emoji — collect for separate pass
                 appendTextQuad(&emojiQuads,
                                x: glyphX, y: glyphY,
                                w: uv.glyphWidth, h: uv.glyphHeight,
@@ -432,11 +432,31 @@ class MetalRenderer {
         return traits.contains(.traitColorGlyphs)
     }
 
-    private func ensureGlyph(codepoint: UInt32) -> GlyphUV {
+    private static let clusterSentinel: UInt32 = 0x110000
+
+    private func ensureGlyph(codepoint: UInt32, clusterData: UnsafeBufferPointer<UInt8> = .init(start: nil, count: 0)) -> GlyphUV {
         if let cached = glyphCache[codepoint] {
             return cached
         }
 
+        // Multi-codepoint cluster: extract string from cluster data buffer
+        if codepoint >= Self.clusterSentinel {
+            let offset = Int(codepoint - Self.clusterSentinel)
+            guard offset < clusterData.count else {
+                let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                                  bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+                glyphCache[codepoint] = uv
+                return uv
+            }
+            // Read null-terminated UTF-8 string
+            var len = 0
+            while offset + len < clusterData.count && clusterData[offset + len] != 0 { len += 1 }
+            let bytes = Array(clusterData[offset..<offset + len])
+            let str = String(bytes: bytes, encoding: .utf8) ?? "\u{FFFD}"
+            return rasterizeClusterGlyph(key: codepoint, string: str)
+        }
+
+        // Single codepoint path
         var chars = [UniChar](repeating: 0, count: 2)
         var glyphs = [CGGlyph](repeating: 0, count: 2)
         var count = 1
@@ -468,9 +488,6 @@ class MetalRenderer {
         var boundingRect = CGRect.zero
         CTFontGetBoundingRectsForGlyphs(renderFont, .default, glyphs, &boundingRect, 1)
 
-        var advance = CGSize.zero
-        CTFontGetAdvancesForGlyphs(renderFont, .default, glyphs, &advance, 1)
-
         let padding: CGFloat = 2
         let glyphW = Int(ceil(boundingRect.width) + padding * 2)
         let glyphH = Int(ceil(boundingRect.height) + padding * 2)
@@ -489,6 +506,90 @@ class MetalRenderer {
             return rasterizeMonoGlyph(codepoint: codepoint, renderFont: renderFont, glyphs: glyphs,
                                       boundingRect: boundingRect, glyphW: glyphW, glyphH: glyphH, padding: padding)
         }
+    }
+
+    /// Rasterize a multi-codepoint cluster (flags, ZWJ sequences, keycaps) using CTLine.
+    private func rasterizeClusterGlyph(key: UInt32, string: String) -> GlyphUV {
+        let attrStr = NSAttributedString(string: string, attributes: [.font: ctFont as NSFont])
+        let line = CTLineCreateWithAttributedString(attrStr)
+        let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+
+        let padding: CGFloat = 2
+        let glyphW = Int(ceil(bounds.width) + padding * 2)
+        let glyphH = Int(ceil(bounds.height) + padding * 2)
+
+        if glyphW <= 0 || glyphH <= 0 {
+            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            glyphCache[key] = uv
+            return uv
+        }
+
+        // Always use color atlas for clusters (emoji)
+        if emojiCursorX + glyphW > emojiAtlasWidth {
+            emojiCursorX = 0
+            emojiCursorY += emojiRowHeight + 1
+            emojiRowHeight = 0
+        }
+        if emojiCursorY + glyphH > emojiAtlasHeight {
+            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            glyphCache[key] = uv
+            return uv
+        }
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: nil, width: glyphW, height: glyphH,
+                                  bitsPerComponent: 8, bytesPerRow: glyphW * 4,
+                                  space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else {
+            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            glyphCache[key] = uv
+            return uv
+        }
+
+        ctx.clear(CGRect(x: 0, y: 0, width: glyphW, height: glyphH))
+        ctx.textPosition = CGPoint(x: padding - bounds.origin.x, y: padding - bounds.origin.y)
+        CTLineDraw(line, ctx)
+
+        if let data = ctx.data {
+            let ptr = data.bindMemory(to: UInt8.self, capacity: glyphW * glyphH * 4)
+            for row in 0..<glyphH {
+                for col in 0..<glyphW {
+                    let srcIdx = (row * glyphW + col) * 4
+                    let dstIdx = ((emojiCursorY + row) * emojiAtlasWidth + (emojiCursorX + col)) * 4
+                    emojiAtlasData[dstIdx] = ptr[srcIdx]
+                    emojiAtlasData[dstIdx + 1] = ptr[srcIdx + 1]
+                    emojiAtlasData[dstIdx + 2] = ptr[srcIdx + 2]
+                    emojiAtlasData[dstIdx + 3] = ptr[srcIdx + 3]
+                }
+            }
+        }
+
+        emojiDirtyMinX = min(emojiDirtyMinX, emojiCursorX)
+        emojiDirtyMinY = min(emojiDirtyMinY, emojiCursorY)
+        emojiDirtyMaxX = max(emojiDirtyMaxX, emojiCursorX + glyphW)
+        emojiDirtyMaxY = max(emojiDirtyMaxY, emojiCursorY + glyphH)
+
+        let s = scaleFactor
+        let uv = GlyphUV(
+            uvX: Float(emojiCursorX) / Float(emojiAtlasWidth),
+            uvY: Float(emojiCursorY) / Float(emojiAtlasHeight),
+            uvW: Float(glyphW) / Float(emojiAtlasWidth),
+            uvH: Float(glyphH) / Float(emojiAtlasHeight),
+            bearingX: Float(bounds.origin.x - padding) / s,
+            bearingY: Float(bounds.origin.y + bounds.height + padding) / s,
+            glyphWidth: Float(glyphW) / s,
+            glyphHeight: Float(glyphH) / s,
+            isColor: true
+        )
+
+        glyphCache[key] = uv
+        emojiCursorX += glyphW + 1
+        emojiRowHeight = max(emojiRowHeight, glyphH)
+        emojiAtlasDirty = true
+        return uv
     }
 
     private func rasterizeMonoGlyph(codepoint: UInt32, renderFont: CTFont, glyphs: [CGGlyph],

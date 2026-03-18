@@ -38,6 +38,93 @@ pub fn charWidth(cp: u32) u2 {
     return 1;
 }
 
+/// Returns the byte length of the grapheme cluster starting at `pos` in `data`.
+/// Handles combining marks, regional indicators (flags), ZWJ sequences,
+/// variation selectors, skin tone modifiers, and combining keycap.
+pub fn nextClusterLen(data: []const u8, pos: u32) u32 {
+    const p: usize = pos;
+    if (p >= data.len) return 0;
+
+    const first_cp = decodeCpAt(data, p);
+    const first_byte_len = cpByteLenAt(data, p);
+    var end: usize = p + first_byte_len;
+
+    // Regional indicators: consume exactly two
+    if (first_cp >= 0x1F1E6 and first_cp <= 0x1F1FF) {
+        if (end < data.len) {
+            const next_cp = decodeCpAt(data, end);
+            if (next_cp >= 0x1F1E6 and next_cp <= 0x1F1FF) {
+                end += cpByteLenAt(data, end);
+            }
+        }
+        return @intCast(end - p);
+    }
+
+    // Extend cluster with combining/modifier codepoints
+    while (end < data.len) {
+        const next_cp = decodeCpAt(data, end);
+        const next_len = cpByteLenAt(data, end);
+
+        if (isExtender(next_cp)) {
+            // Combining marks, variation selectors, keycap, skin modifiers
+            end += next_len;
+        } else if (next_cp == 0x200D) {
+            // ZWJ: consume ZWJ + next codepoint
+            end += next_len;
+            if (end < data.len) {
+                end += cpByteLenAt(data, end);
+            }
+        } else {
+            break;
+        }
+    }
+    return @intCast(end - p);
+}
+
+fn isExtender(cp: u32) bool {
+    if (cp == 0xFE0F or cp == 0xFE0E) return true; // variation selectors
+    if (cp == 0x20E3) return true; // combining enclosing keycap
+    if (cp >= 0x1F3FB and cp <= 0x1F3FF) return true; // skin tone modifiers
+    if (cp >= 0x0300 and cp <= 0x036F) return true; // combining diacritical marks
+    if (cp >= 0x1AB0 and cp <= 0x1AFF) return true;
+    if (cp >= 0x1DC0 and cp <= 0x1DFF) return true;
+    if (cp >= 0x20D0 and cp <= 0x20FF) return true;
+    if (cp >= 0xFE20 and cp <= 0xFE2F) return true;
+    if (cp >= 0xE0020 and cp <= 0xE007F) return true; // tag sequences (flag subdivisions)
+    if (cp == 0xE0001) return true; // language tag
+    return false;
+}
+
+fn decodeCpAt(data: []const u8, pos: usize) u32 {
+    if (pos >= data.len) return 0xFFFD;
+    const b0 = data[pos];
+    if (b0 < 0x80) return b0;
+    if (b0 < 0xC0) return 0xFFFD;
+    if (b0 < 0xE0) {
+        if (pos + 1 >= data.len) return 0xFFFD;
+        return (@as(u32, b0 & 0x1F) << 6) | @as(u32, data[pos + 1] & 0x3F);
+    }
+    if (b0 < 0xF0) {
+        if (pos + 2 >= data.len) return 0xFFFD;
+        return (@as(u32, b0 & 0x0F) << 12) | (@as(u32, data[pos + 1] & 0x3F) << 6) | @as(u32, data[pos + 2] & 0x3F);
+    }
+    if (pos + 3 >= data.len) return 0xFFFD;
+    return (@as(u32, b0 & 0x07) << 18) | (@as(u32, data[pos + 1] & 0x3F) << 12) | (@as(u32, data[pos + 2] & 0x3F) << 6) | @as(u32, data[pos + 3] & 0x3F);
+}
+
+fn cpByteLenAt(data: []const u8, pos: usize) usize {
+    if (pos >= data.len) return 1;
+    const b = data[pos];
+    if (b < 0x80) return 1;
+    if (b < 0xC0) return 1;
+    if (b < 0xE0) return 2;
+    if (b < 0xF0) return 3;
+    return 4;
+}
+
+/// Sentinel value: glyph_index values >= this indicate a cluster string offset.
+pub const CLUSTER_SENTINEL: u32 = 0x110000;
+
 /// UTF-8 aware iteration over byte sequences.
 /// For v0.1, we treat bytes as ASCII/UTF-8 code units.
 /// Full grapheme cluster support is deferred.
