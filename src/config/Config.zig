@@ -19,6 +19,7 @@ pub const Config = struct {
     cursor_color: u32 = 0xFFFFFFFF,
     selection_color: u32 = 0x3C404880,
     current_line_color: u32 = 0xFFFFFF0A, // subtle highlight on cursor line
+    trailing_ws_color: u32 = 0xFF5C5C30, // dim red for trailing whitespace
     gutter_fg_color: u32 = 0x7B8496FF, // grey
     gutter_bg_color: u32 = 0x16181AFF, // bg (same as text bg)
     line_number_color: u32 = 0x7B8496FF, // grey
