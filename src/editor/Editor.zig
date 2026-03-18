@@ -1630,14 +1630,27 @@ pub const Editor = struct {
         var pos: u32 = 0;
         var segment: u32 = 0;
         var segment_x: f32 = 0;
+        // Word-boundary wrap tracking
+        var has_space = false;
+        var last_space_pos: u32 = 0;
 
         while (pos < line_len) {
             if (wrap_width > 0 and segment_x >= wrap_width and segment_x > 0) {
-                if (target_segment) |target| {
-                    if (segment == target) return pos;
+                if (has_space) {
+                    // If we're past the target segment already, return last position
+                    if (target_segment) |target| {
+                        if (segment == target) return last_space_pos;
+                    }
+                    pos = last_space_pos;
+                    segment_x = 0;
+                    has_space = false;
+                } else {
+                    if (target_segment) |target| {
+                        if (segment == target) return pos;
+                    }
+                    segment_x = 0;
                 }
                 segment += 1;
-                segment_x = 0;
             }
             const b = self.buffer.byteAt(line_start + pos) orelse break;
             if (b == '\n') break;
@@ -1645,6 +1658,11 @@ pub const Editor = struct {
             const cw = charWidth(cp);
             const cp_len = PieceTable.codepointByteLen(b);
             const char_px_w = self.pixelWidthForCodepoint(cp);
+
+            if (b == ' ' or b == '\t') {
+                has_space = true;
+                last_space_pos = pos + cp_len;
+            }
 
             if (target_segment == null or segment == target_segment.?) {
                 if (target_x < segment_x + char_px_w) {
