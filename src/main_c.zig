@@ -280,6 +280,10 @@ export fn matcha_editor_move_word_right(ed: ?*Editor) void {
     if (ed) |e| e.moveWordRight();
 }
 
+export fn matcha_editor_go_to_line(ed: ?*Editor, line: u32) void {
+    if (ed) |e| e.goToLine(if (line > 0) line - 1 else 0); // convert 1-based to 0-based
+}
+
 // ── Selection ──────────────────────────────────────────────────
 
 export fn matcha_editor_select_left(ed: ?*Editor) void {
