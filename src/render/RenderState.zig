@@ -275,40 +275,28 @@ pub const RenderState = struct {
                         .y = y0,
                         .w = gutter_w,
                         .h = cell_h,
-                        .color = config.line_number_color,
+                        .color = if (line == editor.cursor.line) config.current_line_number_color else config.line_number_color,
                         .line = line + 1,
                     }) catch {};
                 }
             }
 
-            var last_space_col: u32 = 0; // byte offset of last space in current segment
-            var last_space_x: f32 = 0; // pixel offset at that space
+            // Word-boundary wrap state: track last space so we can break there
+            var last_space_col: u32 = 0;
             var last_space_vcol: u32 = 0;
+            var cells_at_space: usize = 0;
             var has_space_in_seg = false;
 
             while (col < content_len) {
+                // Check if we need to wrap
                 if (wrap_enabled and seg_x_offset >= wrap_width and seg_x_offset > 0) {
-                    // Word-boundary wrap: if we have a space in this segment, wrap there
-                    if (has_space_in_seg and last_space_col < col) {
-                        // Rewind to after the last space
+                    if (has_space_in_seg) {
+                        // Truncate cells emitted after the last space, rewind to that point
+                        self.cells.shrinkRetainingCapacity(cells_at_space);
                         col = last_space_col;
-                        seg_x_offset = 0;
                         vcol = last_space_vcol;
-                        // Retroactively move cells after the space to the next segment
-                        var ci = self.cells.items.len;
-                        while (ci > 0) {
-                            ci -= 1;
-                            const c = &self.cells.items[ci];
-                            if (c.y != @as(f32, @floatFromInt(line_base_vrow + last_seg)) * cell_h - editor.scroll_y) break;
-                            if (c.x - gutter_w >= last_space_x) {
-                                c.x = c.x - last_space_x - gutter_w + gutter_w;
-                                c.y += cell_h;
-                                seg_x_offset = c.x - gutter_w + c.w;
-                            }
-                        }
-                    } else {
-                        seg_x_offset = 0;
                     }
+                    seg_x_offset = 0;
                     last_seg += 1;
                     has_space_in_seg = false;
                 }
@@ -369,12 +357,12 @@ pub const RenderState = struct {
                     }) catch {};
                 }
 
-                // Track spaces for word-boundary wrapping
+                // Track spaces for word-boundary wrapping (after cell append)
                 if (byte == ' ' or byte == '\t') {
                     has_space_in_seg = true;
-                    last_space_col = col + cp_len; // position AFTER the space
-                    last_space_x = seg_x_offset + char_px_w;
+                    last_space_col = col + cp_len;
                     last_space_vcol = vcol + cw;
+                    cells_at_space = self.cells.items.len;
                 }
 
                 col += cp_len;
