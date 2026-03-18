@@ -75,6 +75,7 @@ pub fn build(b: *std.Build) void {
         \\  -parse-as-library \
         \\  -o "$APP/Matcha" \
         \\  macos/Sources/App/MatchaApp.swift \
+        \\  macos/Sources/App/TabManager.swift \
         \\  macos/Sources/Bridge/MatchaEditor.swift \
         \\  macos/Sources/Bridge/MatchaConfig.swift \
         \\  macos/Sources/Views/ContentView.swift \
@@ -82,6 +83,7 @@ pub fn build(b: *std.Build) void {
         \\  macos/Sources/Views/MetalEditorView.swift \
         \\  macos/Sources/Views/FindBarView.swift \
         \\  macos/Sources/Views/GoToLineView.swift \
+        \\  macos/Sources/Views/TabBarView.swift \
         \\  macos/Sources/Views/StatusBarView.swift \
         \\  macos/Sources/Renderer/MetalRenderer.swift \
         \\  macos/Sources/Input/KeyEventHandler.swift
