@@ -12,6 +12,7 @@ Requires macOS (Apple Silicon).
 
 - Tab bar for multiple open files per window
 - Syntax highlighting for Zig, Swift, C/C++, Python, JavaScript/TypeScript, Rust, Go, Shell, Markdown, JSON, TOML, and YAML
+- Color emoji rendering
 - CJK and fullwidth character support with automatic font fallback
 - Find and replace with case-sensitive and whole-word options
 - Bracket matching, auto-pairing, and auto-indent
@@ -60,8 +61,4 @@ Key design decisions:
 - Piece table with cached line count and total length
 - Word-boundary wrap cache with prefix-sum array
 - CJK characters use measured font advance widths
-- Glyph atlas with partial dirty-region uploads
-
-## License
-
-MIT
+- Separate grayscale and RGBA glyph atlases with partial dirty-region uploads
