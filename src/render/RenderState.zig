@@ -348,6 +348,30 @@ pub const RenderState = struct {
                 seg_x_offset += char_px_w;
             }
 
+            // Trailing whitespace highlight
+            if (content_len > 0) {
+                var trail_end: u32 = content_len;
+                while (trail_end > 0 and (line_data[trail_end - 1] == ' ' or line_data[trail_end - 1] == '\t')) {
+                    trail_end -= 1;
+                }
+                if (trail_end < content_len) {
+                    const trail_count = content_len - trail_end;
+                    const trail_px_w = @as(f32, @floatFromInt(trail_count)) * cell_w;
+                    const trail_x = seg_x_offset - trail_px_w;
+                    const trail_y = @as(f32, @floatFromInt(line_base_vrow + last_seg)) * cell_h - editor.scroll_y;
+                    const trail_screen_x = if (wrap_enabled) trail_x + gutter_w else trail_x - editor.scroll_x + gutter_w;
+                    if (trail_y + cell_h >= 0 and trail_y <= vp_h) {
+                        self.selections.append(self.allocator, .{
+                            .x = trail_screen_x,
+                            .y = trail_y,
+                            .w = trail_px_w,
+                            .h = cell_h,
+                            .color = config.trailing_ws_color,
+                        }) catch {};
+                    }
+                }
+            }
+
             // Track the full line width, not just currently visible cells.
             if (vcol > max_line_len) max_line_len = vcol;
             if (seg_x_offset > max_line_width) max_line_width = seg_x_offset;
