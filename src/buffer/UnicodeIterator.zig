@@ -28,6 +28,9 @@ pub fn charWidth(cp: u32) u2 {
     if (cp < 0xFFE0) return 1;
     // Fullwidth signs
     if (cp <= 0xFFE6) return 2;
+    if (cp < 0x1F300) return 1;
+    // Emoji: Miscellaneous Symbols, Dingbats, Emoticons, Transport, etc.
+    if (cp <= 0x1F9FF) return 2;
     if (cp < 0x20000) return 1;
     // CJK Unified Ideographs Extension B through G and beyond
     if (cp <= 0x3FFFD) return 2;

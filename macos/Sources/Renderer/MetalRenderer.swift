@@ -10,8 +10,10 @@ class MetalRenderer {
     let commandQueue: MTLCommandQueue
     let colorPipeline: MTLRenderPipelineState
     let textPipeline: MTLRenderPipelineState
+    let emojiPipeline: MTLRenderPipelineState
 
     var glyphAtlasTexture: MTLTexture?
+    var emojiAtlasTexture: MTLTexture?
     var glyphCache: [UInt32: GlyphUV] = [:]
     let ctFont: CTFont
     let cellWidth: Float
@@ -26,6 +28,7 @@ class MetalRenderer {
         var bearingY: Float
         var glyphWidth: Float
         var glyphHeight: Float
+        var isColor: Bool = false
     }
 
     struct QuadVertex {
@@ -44,7 +47,7 @@ class MetalRenderer {
         var height: Float
     }
 
-    // Atlas packing state
+    // Grayscale atlas packing state
     var atlasWidth: Int = 2048
     var atlasHeight: Int = 2048
     var atlasData: [UInt8]
@@ -52,23 +55,37 @@ class MetalRenderer {
     var atlasCursorY: Int = 0
     var atlasRowHeight: Int = 0
     var atlasDirty = false
-    // Dirty region tracking for partial upload
     var atlasDirtyMinX: Int = Int.max
     var atlasDirtyMinY: Int = Int.max
     var atlasDirtyMaxX: Int = 0
     var atlasDirtyMaxY: Int = 0
+
+    // Color (emoji) atlas packing state
+    var emojiAtlasWidth: Int = 1024
+    var emojiAtlasHeight: Int = 1024
+    var emojiAtlasData: [UInt8] // RGBA, 4 bytes per pixel
+    var emojiCursorX: Int = 0
+    var emojiCursorY: Int = 0
+    var emojiRowHeight: Int = 0
+    var emojiAtlasDirty = false
+    var emojiDirtyMinX: Int = Int.max
+    var emojiDirtyMinY: Int = Int.max
+    var emojiDirtyMaxX: Int = 0
+    var emojiDirtyMaxY: Int = 0
 
     var scaleFactor: Float = 2.0
     let ascender: Float
 
     private var bgQuads: [QuadVertex] = []
     private var textQuads: [QuadVertex] = []
+    private var emojiQuads: [QuadVertex] = []
     private var gutterQuads: [QuadVertex] = []
     private var cursorQuads: [QuadVertex] = []
     private var lineNumberQuads: [QuadVertex] = []
 
     private var bgVertexBuffer: MTLBuffer?
     private var textVertexBuffer: MTLBuffer?
+    private var emojiVertexBuffer: MTLBuffer?
     private var gutterVertexBuffer: MTLBuffer?
     private var cursorVertexBuffer: MTLBuffer?
     private var lineNumberVertexBuffer: MTLBuffer?
@@ -84,6 +101,7 @@ class MetalRenderer {
         self.ctFont = font as CTFont
         self.ascender = Float(CTFontGetAscent(font as CTFont)) / scaleFactor
         self.atlasData = [UInt8](repeating: 0, count: atlasWidth * atlasHeight)
+        self.emojiAtlasData = [UInt8](repeating: 0, count: emojiAtlasWidth * emojiAtlasHeight * 4)
 
         guard let library = try? device.makeLibrary(source: MetalRenderer.shaderSource, options: nil) else {
             return nil
@@ -97,21 +115,25 @@ class MetalRenderer {
         blendDesc.colorAttachments[0].sourceAlphaBlendFactor = .one
         blendDesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
-        // Color pipeline (solid quads: backgrounds, selections, cursors)
         let colorDesc = MTLRenderPipelineDescriptor()
         colorDesc.vertexFunction = library.makeFunction(name: "vertex_main")
         colorDesc.fragmentFunction = library.makeFunction(name: "fragment_color")
         colorDesc.colorAttachments[0] = blendDesc.colorAttachments[0]
 
-        // Text pipeline (textured quads: glyphs from atlas)
         let textDesc = MTLRenderPipelineDescriptor()
         textDesc.vertexFunction = library.makeFunction(name: "vertex_main")
         textDesc.fragmentFunction = library.makeFunction(name: "fragment_text")
         textDesc.colorAttachments[0] = blendDesc.colorAttachments[0]
 
+        let emojiDesc = MTLRenderPipelineDescriptor()
+        emojiDesc.vertexFunction = library.makeFunction(name: "vertex_main")
+        emojiDesc.fragmentFunction = library.makeFunction(name: "fragment_emoji")
+        emojiDesc.colorAttachments[0] = blendDesc.colorAttachments[0]
+
         do {
             self.colorPipeline = try device.makeRenderPipelineState(descriptor: colorDesc)
             self.textPipeline = try device.makeRenderPipelineState(descriptor: textDesc)
+            self.emojiPipeline = try device.makeRenderPipelineState(descriptor: emojiDesc)
         } catch {
             return nil
         }
@@ -127,11 +149,9 @@ class MetalRenderer {
         let viewWidth = Float(view.drawableSize.width) / scaleFactor
         let viewHeight = Float(view.drawableSize.height) / scaleFactor
 
-        // Update viewport uniform
         var viewport = ViewportUniforms(width: viewWidth, height: viewHeight)
         viewportBuffer?.contents().copyMemory(from: &viewport, byteCount: MemoryLayout<ViewportUniforms>.size)
 
-        // Get render data from Zig core
         let cells = editor.getCells()
         let cursors = editor.getCursors()
         let selections = editor.getSelections()
@@ -171,11 +191,12 @@ class MetalRenderer {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: bgQuads.count)
         }
 
-        // Pass 2: Content text
+        // Pass 2: Content text (monochrome glyphs)
         encoder.setRenderPipelineState(textPipeline)
         encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
         ensureAtlasTexture()
         textQuads.removeAll(keepingCapacity: true)
+        emojiQuads.removeAll(keepingCapacity: true)
         textQuads.reserveCapacity(cells.count * 6)
         for i in 0..<cells.count {
             let cell = cells[i]
@@ -183,16 +204,26 @@ class MetalRenderer {
             if codepoint <= 32 { continue }
 
             let uv = ensureGlyph(codepoint: codepoint)
-            let fgColor = colorToRGBA(cell.fg)
+            if uv.glyphWidth <= 0 { continue }
 
             let glyphX = cell.x + uv.bearingX
             let glyphY = cell.y + ascender - uv.bearingY
 
-            appendTextQuad(&textQuads,
-                           x: glyphX, y: glyphY,
-                           w: uv.glyphWidth, h: uv.glyphHeight,
-                           uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
-                           r: fgColor.r, g: fgColor.g, b: fgColor.b, a: fgColor.a)
+            if uv.isColor {
+                // Color emoji — collect for separate pass
+                appendTextQuad(&emojiQuads,
+                               x: glyphX, y: glyphY,
+                               w: uv.glyphWidth, h: uv.glyphHeight,
+                               uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
+                               r: 1, g: 1, b: 1, a: 1)
+            } else {
+                let fgColor = colorToRGBA(cell.fg)
+                appendTextQuad(&textQuads,
+                               x: glyphX, y: glyphY,
+                               w: uv.glyphWidth, h: uv.glyphHeight,
+                               uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
+                               r: fgColor.r, g: fgColor.g, b: fgColor.b, a: fgColor.a)
+            }
         }
         if let buffer = Self.uploadVertices(textQuads, device: device, into: &textVertexBuffer),
            let atlasTexture = glyphAtlasTexture
@@ -202,7 +233,21 @@ class MetalRenderer {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: textQuads.count)
         }
 
-        // Pass 3: Gutter backgrounds (drawn ON TOP of content to mask overflow)
+        // Pass 2b: Color emoji
+        if !emojiQuads.isEmpty {
+            encoder.setRenderPipelineState(emojiPipeline)
+            encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
+            ensureEmojiAtlasTexture()
+            if let buffer = Self.uploadVertices(emojiQuads, device: device, into: &emojiVertexBuffer),
+               let emojiTex = emojiAtlasTexture
+            {
+                encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+                encoder.setFragmentTexture(emojiTex, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: emojiQuads.count)
+            }
+        }
+
+        // Pass 3: Gutter backgrounds
         encoder.setRenderPipelineState(colorPipeline)
         encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
         gutterQuads.removeAll(keepingCapacity: true)
@@ -260,7 +305,6 @@ class MetalRenderer {
             let rightPad = cellWidth * 0.5
             let lineNumColor = colorToRGBA(ln.color)
 
-            // Extract digits without String allocation
             var num = Int(ln.line)
             var digitCount = 0
             var digitBuf: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) = (0,0,0,0,0,0,0,0,0,0)
@@ -274,7 +318,6 @@ class MetalRenderer {
                 }
             }
 
-            // Render right-to-left (index 0 = ones place = rightmost)
             withUnsafePointer(to: &digitBuf) { ptr in
                 ptr.withMemoryRebound(to: UInt32.self, capacity: 10) { buf in
                     for di in 0..<digitCount {
@@ -323,43 +366,70 @@ class MetalRenderer {
         return vertexBuffer
     }
 
-    // MARK: - Glyph Atlas
+    // MARK: - Glyph Atlas (grayscale)
 
     private func ensureAtlasTexture() {
-        // Create texture once
         if glyphAtlasTexture == nil {
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .r8Unorm,
-                width: atlasWidth,
-                height: atlasHeight,
-                mipmapped: false
-            )
+                width: atlasWidth, height: atlasHeight, mipmapped: false)
             desc.usage = [.shaderRead]
             glyphAtlasTexture = device.makeTexture(descriptor: desc)
         }
 
-        // Partial upload of only the dirty region
         if atlasDirty, let tex = glyphAtlasTexture {
-            let x = atlasDirtyMinX
-            let y = atlasDirtyMinY
-            let w = atlasDirtyMaxX - x
-            let h = atlasDirtyMaxY - y
+            let x = atlasDirtyMinX, y = atlasDirtyMinY
+            let w = atlasDirtyMaxX - x, h = atlasDirtyMaxY - y
             if w > 0 && h > 0 {
                 let region = MTLRegion(origin: MTLOrigin(x: x, y: y, z: 0),
                                        size: MTLSize(width: w, height: h, depth: 1))
-                let rowStart = y * atlasWidth + x
                 atlasData.withUnsafeBufferPointer { ptr in
                     tex.replace(region: region, mipmapLevel: 0,
-                                withBytes: ptr.baseAddress! + rowStart,
+                                withBytes: ptr.baseAddress! + y * atlasWidth + x,
                                 bytesPerRow: atlasWidth)
                 }
             }
-            atlasDirtyMinX = Int.max
-            atlasDirtyMinY = Int.max
-            atlasDirtyMaxX = 0
-            atlasDirtyMaxY = 0
+            atlasDirtyMinX = Int.max; atlasDirtyMinY = Int.max
+            atlasDirtyMaxX = 0; atlasDirtyMaxY = 0
             atlasDirty = false
         }
+    }
+
+    // MARK: - Emoji Atlas (RGBA)
+
+    private func ensureEmojiAtlasTexture() {
+        if emojiAtlasTexture == nil {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: emojiAtlasWidth, height: emojiAtlasHeight, mipmapped: false)
+            desc.usage = [.shaderRead]
+            emojiAtlasTexture = device.makeTexture(descriptor: desc)
+        }
+
+        if emojiAtlasDirty, let tex = emojiAtlasTexture {
+            let x = emojiDirtyMinX, y = emojiDirtyMinY
+            let w = emojiDirtyMaxX - x, h = emojiDirtyMaxY - y
+            if w > 0 && h > 0 {
+                let region = MTLRegion(origin: MTLOrigin(x: x, y: y, z: 0),
+                                       size: MTLSize(width: w, height: h, depth: 1))
+                let bytesPerRow = emojiAtlasWidth * 4
+                emojiAtlasData.withUnsafeBufferPointer { ptr in
+                    tex.replace(region: region, mipmapLevel: 0,
+                                withBytes: ptr.baseAddress! + (y * emojiAtlasWidth + x) * 4,
+                                bytesPerRow: bytesPerRow)
+                }
+            }
+            emojiDirtyMinX = Int.max; emojiDirtyMinY = Int.max
+            emojiDirtyMaxX = 0; emojiDirtyMaxY = 0
+            emojiAtlasDirty = false
+        }
+    }
+
+    // MARK: - Glyph Rasterization
+
+    private func isColorFont(_ font: CTFont) -> Bool {
+        let traits = CTFontGetSymbolicTraits(font)
+        return traits.contains(.traitColorGlyphs)
     }
 
     private func ensureGlyph(codepoint: UInt32) -> GlyphUV {
@@ -367,7 +437,6 @@ class MetalRenderer {
             return cached
         }
 
-        // Rasterize glyph using CoreText
         var chars = [UniChar](repeating: 0, count: 2)
         var glyphs = [CGGlyph](repeating: 0, count: 2)
         var count = 1
@@ -384,7 +453,6 @@ class MetalRenderer {
 
         CTFontGetGlyphsForCharacters(ctFont, chars, &glyphs, count)
 
-        // Font fallback: if primary font doesn't have this glyph, find one that does
         var renderFont: CTFont = ctFont
         if glyphs[0] == 0 {
             if let scalar = Unicode.Scalar(codepoint) {
@@ -394,6 +462,8 @@ class MetalRenderer {
                 CTFontGetGlyphsForCharacters(renderFont, chars, &glyphs, count)
             }
         }
+
+        let useColorAtlas = isColorFont(renderFont)
 
         var boundingRect = CGRect.zero
         CTFontGetBoundingRectsForGlyphs(renderFont, .default, glyphs, &boundingRect, 1)
@@ -412,13 +482,22 @@ class MetalRenderer {
             return uv
         }
 
-        // Allocate space in atlas
+        if useColorAtlas {
+            return rasterizeColorGlyph(codepoint: codepoint, renderFont: renderFont, glyphs: glyphs,
+                                       boundingRect: boundingRect, glyphW: glyphW, glyphH: glyphH, padding: padding)
+        } else {
+            return rasterizeMonoGlyph(codepoint: codepoint, renderFont: renderFont, glyphs: glyphs,
+                                      boundingRect: boundingRect, glyphW: glyphW, glyphH: glyphH, padding: padding)
+        }
+    }
+
+    private func rasterizeMonoGlyph(codepoint: UInt32, renderFont: CTFont, glyphs: [CGGlyph],
+                                     boundingRect: CGRect, glyphW: Int, glyphH: Int, padding: CGFloat) -> GlyphUV {
         if atlasCursorX + glyphW > atlasWidth {
             atlasCursorX = 0
             atlasCursorY += atlasRowHeight + 1
             atlasRowHeight = 0
         }
-
         if atlasCursorY + glyphH > atlasHeight {
             let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                               bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
@@ -426,7 +505,6 @@ class MetalRenderer {
             return uv
         }
 
-        // Render glyph to bitmap
         let colorSpace = CGColorSpaceCreateDeviceGray()
         guard let ctx = CGContext(data: nil, width: glyphW, height: glyphH,
                                   bitsPerComponent: 8, bytesPerRow: glyphW,
@@ -439,61 +517,118 @@ class MetalRenderer {
 
         ctx.setFillColor(gray: 0, alpha: 1)
         ctx.fill(CGRect(x: 0, y: 0, width: glyphW, height: glyphH))
-
-        let originX = padding - boundingRect.origin.x
-        let originY = padding - boundingRect.origin.y
-        let position = CGPoint(x: originX, y: originY)
-
+        let position = CGPoint(x: padding - boundingRect.origin.x, y: padding - boundingRect.origin.y)
         ctx.setFillColor(gray: 1, alpha: 1)
         CTFontDrawGlyphs(renderFont, glyphs, [position], 1, ctx)
 
-        // Copy bitmap to atlas
         if let data = ctx.data {
             let ptr = data.bindMemory(to: UInt8.self, capacity: glyphW * glyphH)
             for row in 0..<glyphH {
                 for col in 0..<glyphW {
-                    let srcIdx = row * glyphW + col
-                    let dstIdx = (atlasCursorY + row) * atlasWidth + (atlasCursorX + col)
-                    atlasData[dstIdx] = ptr[srcIdx]
+                    atlasData[(atlasCursorY + row) * atlasWidth + (atlasCursorX + col)] = ptr[row * glyphW + col]
                 }
             }
         }
 
-        // Track dirty region for partial upload
         atlasDirtyMinX = min(atlasDirtyMinX, atlasCursorX)
         atlasDirtyMinY = min(atlasDirtyMinY, atlasCursorY)
         atlasDirtyMaxX = max(atlasDirtyMaxX, atlasCursorX + glyphW)
         atlasDirtyMaxY = max(atlasDirtyMaxY, atlasCursorY + glyphH)
 
-        let uvX = Float(atlasCursorX) / Float(atlasWidth)
-        let uvY = Float(atlasCursorY) / Float(atlasHeight)
-        let uvW = Float(glyphW) / Float(atlasWidth)
-        let uvH = Float(glyphH) / Float(atlasHeight)
-
         let s = scaleFactor
         let uv = GlyphUV(
-            uvX: uvX, uvY: uvY, uvW: uvW, uvH: uvH,
+            uvX: Float(atlasCursorX) / Float(atlasWidth),
+            uvY: Float(atlasCursorY) / Float(atlasHeight),
+            uvW: Float(glyphW) / Float(atlasWidth),
+            uvH: Float(glyphH) / Float(atlasHeight),
             bearingX: Float(boundingRect.origin.x - padding) / s,
             bearingY: Float(boundingRect.origin.y + boundingRect.height + padding) / s,
             glyphWidth: Float(glyphW) / s,
-            glyphHeight: Float(glyphH) / s
+            glyphHeight: Float(glyphH) / s,
+            isColor: false
         )
 
         glyphCache[codepoint] = uv
         atlasCursorX += glyphW + 1
         atlasRowHeight = max(atlasRowHeight, glyphH)
         atlasDirty = true
-
         return uv
     }
 
-    // MARK: - Geometry Helpers (point-space coordinates, GPU does NDC conversion)
+    private func rasterizeColorGlyph(codepoint: UInt32, renderFont: CTFont, glyphs: [CGGlyph],
+                                      boundingRect: CGRect, glyphW: Int, glyphH: Int, padding: CGFloat) -> GlyphUV {
+        if emojiCursorX + glyphW > emojiAtlasWidth {
+            emojiCursorX = 0
+            emojiCursorY += emojiRowHeight + 1
+            emojiRowHeight = 0
+        }
+        if emojiCursorY + glyphH > emojiAtlasHeight {
+            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            glyphCache[codepoint] = uv
+            return uv
+        }
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: nil, width: glyphW, height: glyphH,
+                                  bitsPerComponent: 8, bytesPerRow: glyphW * 4,
+                                  space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else {
+            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            glyphCache[codepoint] = uv
+            return uv
+        }
+
+        ctx.clear(CGRect(x: 0, y: 0, width: glyphW, height: glyphH))
+        let position = CGPoint(x: padding - boundingRect.origin.x, y: padding - boundingRect.origin.y)
+        CTFontDrawGlyphs(renderFont, glyphs, [position], 1, ctx)
+
+        if let data = ctx.data {
+            let ptr = data.bindMemory(to: UInt8.self, capacity: glyphW * glyphH * 4)
+            for row in 0..<glyphH {
+                for col in 0..<glyphW {
+                    let srcIdx = (row * glyphW + col) * 4
+                    let dstIdx = ((emojiCursorY + row) * emojiAtlasWidth + (emojiCursorX + col)) * 4
+                    emojiAtlasData[dstIdx] = ptr[srcIdx]         // B
+                    emojiAtlasData[dstIdx + 1] = ptr[srcIdx + 1] // G
+                    emojiAtlasData[dstIdx + 2] = ptr[srcIdx + 2] // R
+                    emojiAtlasData[dstIdx + 3] = ptr[srcIdx + 3] // A
+                }
+            }
+        }
+
+        emojiDirtyMinX = min(emojiDirtyMinX, emojiCursorX)
+        emojiDirtyMinY = min(emojiDirtyMinY, emojiCursorY)
+        emojiDirtyMaxX = max(emojiDirtyMaxX, emojiCursorX + glyphW)
+        emojiDirtyMaxY = max(emojiDirtyMaxY, emojiCursorY + glyphH)
+
+        let s = scaleFactor
+        let uv = GlyphUV(
+            uvX: Float(emojiCursorX) / Float(emojiAtlasWidth),
+            uvY: Float(emojiCursorY) / Float(emojiAtlasHeight),
+            uvW: Float(glyphW) / Float(emojiAtlasWidth),
+            uvH: Float(glyphH) / Float(emojiAtlasHeight),
+            bearingX: Float(boundingRect.origin.x - padding) / s,
+            bearingY: Float(boundingRect.origin.y + boundingRect.height + padding) / s,
+            glyphWidth: Float(glyphW) / s,
+            glyphHeight: Float(glyphH) / s,
+            isColor: true
+        )
+
+        glyphCache[codepoint] = uv
+        emojiCursorX += glyphW + 1
+        emojiRowHeight = max(emojiRowHeight, glyphH)
+        emojiAtlasDirty = true
+        return uv
+    }
+
+    // MARK: - Geometry Helpers
 
     private func appendQuad(_ quads: inout [QuadVertex],
                             x: Float, y: Float, w: Float, h: Float,
                             r: Float, g: Float, b: Float, a: Float) {
-        let x1 = x + w
-        let y1 = y + h
+        let x1 = x + w, y1 = y + h
         quads.append(QuadVertex(x: x, y: y, u: 0, v: 0, r: r, g: g, b: b, a: a))
         quads.append(QuadVertex(x: x1, y: y, u: 1, v: 0, r: r, g: g, b: b, a: a))
         quads.append(QuadVertex(x: x, y: y1, u: 0, v: 1, r: r, g: g, b: b, a: a))
@@ -506,13 +641,8 @@ class MetalRenderer {
                                 x: Float, y: Float, w: Float, h: Float,
                                 uvX: Float, uvY: Float, uvW: Float, uvH: Float,
                                 r: Float, g: Float, b: Float, a: Float) {
-        let x1 = x + w
-        let y1 = y + h
-        let u0 = uvX
-        let v0 = uvY
-        let u1 = uvX + uvW
-        let v1 = uvY + uvH
-
+        let x1 = x + w, y1 = y + h
+        let u0 = uvX, v0 = uvY, u1 = uvX + uvW, v1 = uvY + uvH
         quads.append(QuadVertex(x: x, y: y, u: u0, v: v0, r: r, g: g, b: b, a: a))
         quads.append(QuadVertex(x: x1, y: y, u: u1, v: v0, r: r, g: g, b: b, a: a))
         quads.append(QuadVertex(x: x, y: y1, u: u0, v: v1, r: r, g: g, b: b, a: a))
@@ -536,20 +666,11 @@ class MetalRenderer {
     using namespace metal;
 
     struct QuadVertex {
-        float x;
-        float y;
-        float u;
-        float v;
-        float r;
-        float g;
-        float b;
-        float a;
+        float x; float y; float u; float v;
+        float r; float g; float b; float a;
     };
 
-    struct Viewport {
-        float width;
-        float height;
-    };
+    struct Viewport { float width; float height; };
 
     struct VertexOut {
         float4 position [[position]];
@@ -557,7 +678,6 @@ class MetalRenderer {
         float4 color;
     };
 
-    // Unified vertex shader — converts point-space coords to NDC via viewport uniform
     vertex VertexOut vertex_main(const device QuadVertex* vertices [[buffer(0)]],
                                  constant Viewport& viewport [[buffer(1)]],
                                  uint vid [[vertex_id]]) {
@@ -579,6 +699,12 @@ class MetalRenderer {
         constexpr sampler s(mag_filter::linear, min_filter::linear);
         float alpha = atlas.sample(s, in.texcoord).r;
         return float4(in.color.rgb, in.color.a * alpha);
+    }
+
+    fragment float4 fragment_emoji(VertexOut in [[stage_in]],
+                                    texture2d<float> atlas [[texture(0)]]) {
+        constexpr sampler s(mag_filter::linear, min_filter::linear);
+        return atlas.sample(s, in.texcoord);
     }
     """
 }
