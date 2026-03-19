@@ -128,6 +128,16 @@ struct ContentView: View {
             goToLineText = ""
             showGoToLine = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFilePath)) { notification in
+            guard isKeyWindow else { return }
+            if let path = notification.userInfo?["path"] as? String {
+                if let ed = editor, ed.info.filename == nil && !ed.info.modified {
+                    tabManager.openInCurrentTab(path: path)
+                } else {
+                    tabManager.openInNewTab(path: path)
+                }
+            }
+        }
         .onAppear {
             editor?.markActive()
 
