@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import MatchaKit
 
 /// Swift wrapper around the Zig config (matcha_config_t).
@@ -12,6 +13,11 @@ class MatchaConfig: ObservableObject {
         let configDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/matcha/config")
         matcha_config_load_file(handle, configDir.path)
+
+        // Sync appearance=auto with system dark mode
+        let appearance = NSAppearance.currentDrawing()
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        matcha_config_set_system_dark(handle, isDark)
     }
 
     deinit {

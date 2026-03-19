@@ -13,6 +13,7 @@ pub fn parseFile(allocator: Allocator, config: *Config, path: []const u8) !void 
     defer allocator.free(content);
 
     try parse(allocator, config, content);
+    config.applyAppearance();
 }
 
 pub fn parse(allocator: Allocator, config: *Config, content: []const u8) !void {
@@ -41,6 +42,16 @@ fn applyKeyValue(allocator: Allocator, config: *Config, key: []const u8, value: 
         config.insert_spaces = std.mem.eql(u8, value, "true");
     } else if (std.mem.eql(u8, key, "line-numbers")) {
         config.line_numbers = std.mem.eql(u8, value, "true");
+    } else if (std.mem.eql(u8, key, "wrap-lines")) {
+        config.wrap_lines = std.mem.eql(u8, value, "true");
+    } else if (std.mem.eql(u8, key, "appearance")) {
+        if (std.mem.eql(u8, value, "dark")) {
+            config.appearance = .dark;
+        } else if (std.mem.eql(u8, value, "light")) {
+            config.appearance = .light;
+        } else {
+            config.appearance = .auto;
+        }
     } else if (std.mem.eql(u8, key, "bg-color")) {
         config.bg_color = parseColor(value);
     } else if (std.mem.eql(u8, key, "fg-color")) {

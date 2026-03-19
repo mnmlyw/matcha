@@ -4,6 +4,7 @@ struct GoToLineView: View {
     @Binding var text: String
     @Binding var isVisible: Bool
     let onGo: (Int) -> Void
+    var bgColor: UInt32 = 0xF2F2EEFF
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -32,7 +33,7 @@ struct GoToLineView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color(hex: 0x1E2124FF))
+        .background(Color(hex: bgColor))
         .cornerRadius(6)
         .shadow(radius: 4)
         .onAppear { focused = true }
