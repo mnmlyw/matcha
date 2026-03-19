@@ -24,10 +24,10 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         self.editor = editor
 
         // Set up font
-        let fontSize = CGFloat(matcha_config_get_float(editor.handle, "font-size"))
+        let fontSize = CGFloat(matcha_config_get_float(editor.config.handle, "font-size"))
         let size = fontSize > 0 ? fontSize : 14.0
 
-        if let cfFamily = matcha_config_get_string(editor.handle, "font-family") {
+        if let cfFamily = matcha_config_get_string(editor.config.handle, "font-family") {
             let family = String(cString: cfFamily)
             matcha_free_string(UnsafeMutablePointer(mutating: cfFamily))
             self.font = NSFont(name: family, size: size) ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
@@ -40,7 +40,12 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         self.delegate = self
         self.isPaused = true
         self.enableSetNeedsDisplay = true
-        self.clearColor = MTLClearColor(red: 22.0/255.0, green: 24.0/255.0, blue: 26.0/255.0, alpha: 1.0)
+        let bgColor = matcha_config_get_color(editor.config.handle, "bg-color")
+        self.clearColor = MTLClearColor(
+            red: Double((bgColor >> 24) & 0xFF) / 255.0,
+            green: Double((bgColor >> 16) & 0xFF) / 255.0,
+            blue: Double((bgColor >> 8) & 0xFF) / 255.0,
+            alpha: 1.0)
 
         // Calculate cell dimensions from font (in points)
         calculateCellDimensions()
@@ -94,6 +99,12 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 self?.editor.markActive()
                 self?.requestRedraw()
             }
+            // Match window background to editor bg color
+            window.backgroundColor = NSColor(
+                red: CGFloat(clearColor.red),
+                green: CGFloat(clearColor.green),
+                blue: CGFloat(clearColor.blue),
+                alpha: 1.0)
             window.makeFirstResponder(self)
             editor.markActive()
             updateViewport()

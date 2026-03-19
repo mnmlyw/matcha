@@ -1,4 +1,5 @@
 import Foundation
+import MatchaKit
 
 class TabManager: ObservableObject {
     let config: MatchaConfig
@@ -26,6 +27,12 @@ class TabManager: ObservableObject {
     }
 
     var activeEditor: MatchaEditor? { activeTab?.editor }
+
+    var bgColor: UInt32 { matcha_config_get_color(config.handle, "bg-color") }
+    var chromeBg: UInt32 { matcha_config_get_color(config.handle, "chrome-bg-color") }
+    var chromeActiveBg: UInt32 { matcha_config_get_color(config.handle, "chrome-active-bg-color") }
+    var chromeFg: UInt32 { matcha_config_get_color(config.handle, "chrome-fg-color") }
+    var chromeDim: UInt32 { matcha_config_get_color(config.handle, "chrome-dim-color") }
 
     init() {
         let cfg = MatchaConfig()

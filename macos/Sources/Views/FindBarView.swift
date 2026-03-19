@@ -12,6 +12,7 @@ struct FindBarView: View {
     let onFindPrev: () -> Void
     let onReplaceNext: () -> Void
     let onReplaceAll: () -> Void
+    var bgColor: UInt32 = 0xF2F2EEFF
     @FocusState private var searchFieldFocused: Bool
     @State private var liveSearchWorkItem: DispatchWorkItem?
 
@@ -98,7 +99,7 @@ struct FindBarView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color(hex: 0x1E2124FF)) // bg_alt
+        .background(Color(hex: bgColor)) // bg_alt
         .onAppear {
             searchFieldFocused = true
             // Pre-fill with selection if available
