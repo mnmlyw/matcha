@@ -99,6 +99,13 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 self?.editor.markActive()
                 self?.requestRedraw()
             }
+            // Match window background to editor bg color
+            let bgColor = matcha_config_get_color(editor.handle, "bg-color")
+            window.backgroundColor = NSColor(
+                red: CGFloat((bgColor >> 24) & 0xFF) / 255.0,
+                green: CGFloat((bgColor >> 16) & 0xFF) / 255.0,
+                blue: CGFloat((bgColor >> 8) & 0xFF) / 255.0,
+                alpha: 1.0)
             window.makeFirstResponder(self)
             editor.markActive()
             updateViewport()
