@@ -106,6 +106,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         matcha_init()
     }
 
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        if let editor = MatchaEditor.activeEditor {
+            // If active tab is empty, open in it; otherwise new tab
+            if editor.info.filename == nil && !editor.info.modified {
+                NotificationCenter.default.post(name: .matchaOpenFilePath,
+                                                object: nil,
+                                                userInfo: ["path": filename])
+            } else {
+                NotificationCenter.default.post(name: .matchaOpenFilePath,
+                                                object: nil,
+                                                userInfo: ["path": filename])
+            }
+        } else {
+            AppDelegate.pendingFilePath = filename
+            newWindowAction()
+        }
+        return true
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
             newWindowAction()
@@ -144,4 +163,5 @@ extension Notification.Name {
     static let matchaFindNext = Notification.Name("matchaFindNext")
     static let matchaFindPrev = Notification.Name("matchaFindPrev")
     static let matchaGoToLine = Notification.Name("matchaGoToLine")
+    static let matchaOpenFilePath = Notification.Name("matchaOpenFilePath")
 }
