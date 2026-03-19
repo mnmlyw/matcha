@@ -30,8 +30,8 @@ class TabManager: ObservableObject {
     init() {
         let cfg = MatchaConfig()
         self.config = cfg
-        // Start with one empty tab
         let editor = MatchaEditor(config: cfg)
+        editor.markActive()
         tabs.append(Tab(editor: editor))
     }
 
@@ -57,15 +57,21 @@ class TabManager: ObservableObject {
 
     func closeTab(at index: Int) {
         guard tabs.count > 1 else {
-            // Last tab — reset to empty instead of closing
             activeEditor?.newFile()
             return
         }
+        // If closing the active tab, adjust index first
+        let wasActive = index == activeIndex
         tabs.remove(at: index)
-        if activeIndex >= tabs.count {
+        if activeIndex > index {
+            activeIndex -= 1
+        } else if activeIndex >= tabs.count {
             activeIndex = tabs.count - 1
         }
-        activeTab?.editor.markActive()
+        // Always update activeEditor ref after tab removal
+        if wasActive || MatchaEditor.activeEditor == nil {
+            activeTab?.editor.markActive()
+        }
     }
 
     func closeCurrentTab() {

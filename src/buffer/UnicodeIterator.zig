@@ -69,11 +69,11 @@ pub fn nextClusterLen(data: []const u8, pos: u32) u32 {
             // Combining marks, variation selectors, keycap, skin modifiers
             end += next_len;
         } else if (next_cp == 0x200D) {
-            // ZWJ: consume ZWJ + next codepoint
-            end += next_len;
-            if (end < data.len) {
-                end += cpByteLenAt(data, end);
-            }
+            // ZWJ: consume ZWJ + next codepoint (if available)
+            const after_zwj = end + next_len;
+            if (after_zwj >= data.len) break; // ZWJ at end of string, stop
+            end = after_zwj + cpByteLenAt(data, after_zwj);
+            if (end > data.len) end = data.len; // clamp to buffer
         } else {
             break;
         }

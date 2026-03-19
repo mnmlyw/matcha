@@ -387,16 +387,16 @@ pub const RenderState = struct {
                 seg_x_offset += char_px_w;
             }
 
-            // Trailing whitespace highlight
+            // Trailing whitespace highlight (skip if entire line is whitespace)
             if (content_len > 0) {
                 var trail_end: u32 = content_len;
                 while (trail_end > 0 and (line_data[trail_end - 1] == ' ' or line_data[trail_end - 1] == '\t')) {
                     trail_end -= 1;
                 }
-                if (trail_end < content_len) {
+                if (trail_end > 0 and trail_end < content_len) {
                     const trail_count = content_len - trail_end;
                     const trail_px_w = @as(f32, @floatFromInt(trail_count)) * cell_w;
-                    const trail_x = seg_x_offset - trail_px_w;
+                    const trail_x = @max(0, seg_x_offset - trail_px_w);
                     const trail_y = @as(f32, @floatFromInt(line_base_vrow + last_seg)) * cell_h - editor.scroll_y;
                     const trail_screen_x = if (wrap_enabled) trail_x + gutter_w else trail_x - editor.scroll_x + gutter_w;
                     if (trail_y + cell_h >= 0 and trail_y <= vp_h) {
