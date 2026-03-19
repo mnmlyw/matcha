@@ -1,4 +1,5 @@
 import SwiftUI
+import Carbon.HIToolbox
 import MatchaKit
 
 @main
@@ -102,27 +103,47 @@ struct MatchaApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     static var pendingFilePath: String? = nil
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Intercept "open documents" Apple Event BEFORE SwiftUI handles it
+        // This prevents SwiftUI from creating extra windows for file opens
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleOpenDocuments(_:withReply:)),
+            forEventClass: AEEventClass(kCoreEventClass),
+            andEventID: AEEventID(kAEOpenDocuments)
+        )
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         matcha_init()
     }
 
-    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-        if let editor = MatchaEditor.activeEditor {
-            // If active tab is empty, open in it; otherwise new tab
-            if editor.info.filename == nil && !editor.info.modified {
-                NotificationCenter.default.post(name: .matchaOpenFilePath,
-                                                object: nil,
-                                                userInfo: ["path": filename])
-            } else {
-                NotificationCenter.default.post(name: .matchaOpenFilePath,
-                                                object: nil,
-                                                userInfo: ["path": filename])
+    @objc func handleOpenDocuments(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
+        guard let descriptorList = event.paramDescriptor(forKeyword: keyDirectObject) else { return }
+        for i in 1...descriptorList.numberOfItems {
+            guard let descriptor = descriptorList.atIndex(i) else { continue }
+            // Try to coerce to file URL
+            if let urlDescriptor = descriptor.coerce(toDescriptorType: typeFileURL) {
+                let urlData = urlDescriptor.data
+                if let urlString = String(data: urlData, encoding: .utf8),
+                   let url = URL(string: urlString) {
+                    openFilePath(url.path)
+                }
             }
-        } else {
-            AppDelegate.pendingFilePath = filename
-            newWindowAction()
         }
-        return true
+    }
+
+    private func openFilePath(_ path: String) {
+        // Delay slightly to ensure the window and editor are ready
+        DispatchQueue.main.async {
+            if MatchaEditor.activeEditor != nil {
+                NotificationCenter.default.post(name: .matchaOpenFilePath,
+                                                object: nil,
+                                                userInfo: ["path": path])
+            } else {
+                AppDelegate.pendingFilePath = path
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
