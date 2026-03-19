@@ -19,7 +19,11 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             if tabManager.tabs.count > 1 {
-                TabBarView(tabManager: tabManager)
+                TabBarView(tabManager: tabManager,
+                          chromeBg: tabManager.chromeBg,
+                          chromeActiveBg: tabManager.chromeActiveBg,
+                          chromeFg: tabManager.chromeFg,
+                          chromeDim: tabManager.chromeDim)
             }
 
             if showFindBar, let ed = editor {
@@ -33,7 +37,8 @@ struct ContentView: View {
                             onFindNext: findNext,
                             onFindPrev: findPrev,
                             onReplaceNext: replaceNext,
-                            onReplaceAll: replaceAll)
+                            onReplaceAll: replaceAll,
+                            bgColor: tabManager.chromeBg)
             }
 
             ZStack(alignment: .top) {
@@ -44,19 +49,22 @@ struct ContentView: View {
                 }
 
                 if showGoToLine {
-                    GoToLineView(text: $goToLineText, isVisible: $showGoToLine) { lineNum in
+                    GoToLineView(text: $goToLineText, isVisible: $showGoToLine, onGo: { lineNum in
                         editor?.goToLine(UInt32(lineNum))
-                    }
+                    }, bgColor: tabManager.chromeBg)
                     .padding(.top, 40)
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
 
             if let ed = editor {
-                StatusBarView(editor: ed)
+                StatusBarView(editor: ed,
+                             bgColor: tabManager.chromeBg,
+                             fgColor: tabManager.chromeFg,
+                             dimColor: tabManager.chromeDim)
             }
         }
-        .background(Color(hex: 0x16181AFF))
+        .background(Color(hex: tabManager.bgColor))
         // Only handle notifications when this window is key (prevents cross-window routing)
         .onReceive(NotificationCenter.default.publisher(for: .matchaNewTab)) { _ in
             guard isKeyWindow else { return }

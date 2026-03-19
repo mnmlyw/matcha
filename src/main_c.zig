@@ -68,6 +68,19 @@ export fn matcha_config_get_bool(cfg: ?*Config, key: ?[*:0]const u8) bool {
     return false;
 }
 
+export fn matcha_config_get_color(cfg: ?*Config, key: ?[*:0]const u8) u32 {
+    const c = cfg orelse return 0;
+    const k = key orelse return 0;
+    const slice = std.mem.span(k);
+
+    if (std.mem.eql(u8, slice, "bg-color")) return c.bg_color;
+    if (std.mem.eql(u8, slice, "chrome-bg-color")) return c.chrome_bg_color;
+    if (std.mem.eql(u8, slice, "chrome-active-bg-color")) return c.chrome_active_bg_color;
+    if (std.mem.eql(u8, slice, "chrome-fg-color")) return c.chrome_fg_color;
+    if (std.mem.eql(u8, slice, "chrome-dim-color")) return c.chrome_dim_color;
+    return 0;
+}
+
 export fn matcha_config_get_float(cfg: ?*Config, key: ?[*:0]const u8) f64 {
     const c = cfg orelse return 0;
     const k = key orelse return 0;

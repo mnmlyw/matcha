@@ -73,6 +73,7 @@ bool matcha_config_load_file(matcha_config_t cfg, const char* path);
 const char* matcha_config_get_string(matcha_config_t cfg, const char* key);
 int64_t matcha_config_get_int(matcha_config_t cfg, const char* key);
 bool matcha_config_get_bool(matcha_config_t cfg, const char* key);
+uint32_t matcha_config_get_color(matcha_config_t cfg, const char* key);
 double matcha_config_get_float(matcha_config_t cfg, const char* key);
 
 // ── Editor ─────────────────────────────────────────────────────
