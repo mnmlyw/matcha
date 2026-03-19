@@ -10,7 +10,7 @@ class MatchaEditor: ObservableObject {
     private static let activeEditorRef = WeakEditorRef()
 
     private(set) var handle: matcha_editor_t?
-    private let config: MatchaConfig
+    let config: MatchaConfig
 
     @Published var info: EditorInfo = EditorInfo()
     @Published var lastError: String? = nil
