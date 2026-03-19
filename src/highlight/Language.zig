@@ -13,6 +13,7 @@ pub const Language = enum {
     markdown,
     json,
     toml,
+    lua,
     yaml,
 
     pub fn detectFromFilename(name: []const u8) Language {
@@ -45,6 +46,7 @@ pub const Language = enum {
             .{ ".markdown", .markdown },
             .{ ".json", .json },
             .{ ".toml", .toml },
+            .{ ".lua", .lua },
             .{ ".yaml", .yaml },
             .{ ".yml", .yaml },
         };
@@ -57,6 +59,7 @@ pub const Language = enum {
     pub fn lineCommentPrefix(self: Language) ?[]const u8 {
         return switch (self) {
             .zig, .swift, .c, .javascript, .rust, .go => "//",
+            .lua => "--",
             .python, .shell, .toml, .yaml => "#",
             else => null,
         };
@@ -98,6 +101,7 @@ test "Language: detect from filename" {
     try std.testing.expectEqual(L.toml, L.detectFromFilename("Cargo.toml"));
     try std.testing.expectEqual(L.yaml, L.detectFromFilename("config.yml"));
     try std.testing.expectEqual(L.yaml, L.detectFromFilename("config.yaml"));
+    try std.testing.expectEqual(L.lua, L.detectFromFilename("init.lua"));
     try std.testing.expectEqual(L.none, L.detectFromFilename("Makefile"));
     try std.testing.expectEqual(L.none, L.detectFromFilename("README"));
 }
@@ -113,5 +117,6 @@ test "Language: line comment prefixes" {
     try std.testing.expectEqualStrings("#", Language.python.lineCommentPrefix().?);
     try std.testing.expectEqualStrings("#", Language.yaml.lineCommentPrefix().?);
     try std.testing.expect(Language.markdown.lineCommentPrefix() == null);
+    try std.testing.expectEqualStrings("--", Language.lua.lineCommentPrefix().?);
     try std.testing.expect(Language.none.lineCommentPrefix() == null);
 }
