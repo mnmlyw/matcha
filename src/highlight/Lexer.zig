@@ -126,7 +126,7 @@ pub fn tokenizeLine(
         }
 
         // Block comment open
-        if (lang != .zig and lang != .python and lang != .shell and
+        if (lang != .zig and lang != .python and lang != .shell and lang != .lua and
             i + 1 < len and ch == '/' and line_bytes[i + 1] == '*')
         {
             const start = i;
@@ -369,7 +369,7 @@ pub fn scanLineState(line_bytes: []const u8, state_in: LineState, lang: Language
         if (isLineComment(line_bytes, @intCast(i), lang)) return state;
 
         // Block comment open
-        if (lang != .zig and lang != .python and lang != .shell and
+        if (lang != .zig and lang != .python and lang != .shell and lang != .lua and
             i + 1 < len and ch == '/' and line_bytes[i + 1] == '*')
         {
             state.in_block_comment = true;
@@ -454,6 +454,7 @@ fn isLineComment(bytes: []const u8, pos: u32, lang: Language) bool {
     if (pos >= bytes.len) return false;
     return switch (lang) {
         .zig, .rust, .swift, .c, .go, .javascript => (pos + 1 < bytes.len and bytes[pos] == '/' and bytes[pos + 1] == '/'),
+        .lua => (pos + 1 < bytes.len and bytes[pos] == '-' and bytes[pos + 1] == '-'),
         .python, .shell, .toml, .yaml => (bytes[pos] == '#'),
         else => false,
     };
@@ -509,6 +510,7 @@ fn isKeyword(word: []const u8, lang: Language) bool {
         .rust => &rust_keywords,
         .go => &go_keywords,
         .shell => &shell_keywords,
+        .lua => &lua_keywords,
         else => return false,
     };
     for (table) |kw| {
@@ -526,6 +528,7 @@ fn isTypeKeyword(word: []const u8, lang: Language) bool {
         .javascript => &js_types,
         .rust => &rust_types,
         .go => &go_types,
+        .lua => &lua_types,
         else => return false,
     };
     for (table) |kw| {
@@ -699,6 +702,21 @@ const shell_keywords = [_][]const u8{
     "return",   "exit",     "export",  "local",
     "readonly", "declare",  "typeset", "unset",
     "source",   "alias",
+};
+
+const lua_keywords = [_][]const u8{
+    "and",      "break",    "do",       "else",
+    "elseif",   "end",      "for",      "function",
+    "goto",     "if",       "in",       "local",
+    "not",      "or",       "repeat",   "return",
+    "then",     "until",    "while",
+};
+
+const lua_types = [_][]const u8{
+    "nil",   "true",   "false",
+    "self",  "string", "table",
+    "math",  "io",     "os",
+    "coroutine",
 };
 
 // ── Tests ──────────────────────────────────────────────────────
