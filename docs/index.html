@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Matcha — A minimal text editor for macOS</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      background: #fafaf9;
+      color: #1a1a1a;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Nav */
+    nav {
+      padding: 20px 0;
+    }
+    nav .container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    nav .logo {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1a1a1a;
+      text-decoration: none;
+    }
+    nav .links a {
+      color: #666;
+      text-decoration: none;
+      font-size: 14px;
+      margin-left: 20px;
+    }
+    nav .links a:hover { color: #1a1a1a; }
+
+    /* Hero */
+    .hero {
+      padding: 80px 0 64px;
+      text-align: center;
+    }
+    .hero .icon {
+      width: 72px;
+      height: 72px;
+      background: #6bbe5a;
+      border-radius: 50%;
+      margin: 0 auto 32px;
+    }
+    .hero h1 {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.8px;
+      margin-bottom: 16px;
+      color: #111;
+    }
+    .hero .subtitle {
+      font-size: 18px;
+      color: #555;
+      max-width: 400px;
+      margin: 0 auto 36px;
+      line-height: 1.5;
+    }
+    .hero .cta {
+      display: inline-block;
+      background: #111;
+      color: #fff;
+      padding: 13px 32px;
+      border-radius: 10px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 15px;
+      transition: background 0.2s;
+    }
+    .hero .cta:hover { background: #333; }
+    .hero .meta {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #999;
+    }
+
+    /* Divider */
+    hr {
+      border: none;
+      border-top: 1px solid #e8e8e6;
+      margin: 0;
+    }
+
+    /* Features */
+    .features {
+      padding: 56px 0;
+    }
+    .feature-list {
+      list-style: none;
+    }
+    .feature-list li {
+      padding: 14px 0;
+      border-bottom: 1px solid #eeede9;
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+    }
+    .feature-list li:last-child { border-bottom: none; }
+    .feature-list .label {
+      font-weight: 600;
+      font-size: 15px;
+      min-width: 160px;
+      color: #111;
+    }
+    .feature-list .desc {
+      font-size: 14px;
+      color: #666;
+    }
+
+    /* Footer */
+    footer {
+      padding: 40px 0;
+      text-align: center;
+      font-size: 13px;
+      color: #999;
+    }
+    footer a { color: #999; }
+
+    @media (max-width: 600px) {
+      .hero h1 { font-size: 28px; }
+      .hero .subtitle { font-size: 16px; }
+      .feature-list li { flex-direction: column; gap: 4px; }
+      .feature-list .label { min-width: auto; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container">
+      <a href="/" class="logo">Matcha</a>
+      <div class="links">
+        <a href="https://github.com/mnmlyw/matcha">Source</a>
+        <a href="https://github.com/mnmlyw/matcha/releases">Releases</a>
+      </div>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="container">
+      <div class="icon"></div>
+      <h1>A text editor that gets<br>out of your way.</h1>
+      <p class="subtitle">Matcha is a fast, minimal editor for macOS. Native rendering. No Electron. Just open and type.</p>
+      <a href="https://github.com/mnmlyw/matcha/releases/latest" class="cta">Download for Mac</a>
+      <div class="meta">macOS &middot; Apple Silicon</div>
+    </div>
+  </section>
+
+  <footer></footer>
+</body>
+</html>
