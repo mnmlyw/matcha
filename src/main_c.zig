@@ -68,6 +68,15 @@ export fn matcha_config_get_bool(cfg: ?*Config, key: ?[*:0]const u8) bool {
     return false;
 }
 
+export fn matcha_config_set_system_dark(cfg: ?*Config, is_dark: bool) void {
+    const c = cfg orelse return;
+    if (c.appearance == .auto) {
+        c.appearance = if (is_dark) .dark else .light;
+        c.applyAppearance();
+        c.appearance = .auto; // restore so future calls still check system
+    }
+}
+
 export fn matcha_config_get_color(cfg: ?*Config, key: ?[*:0]const u8) u32 {
     const c = cfg orelse return 0;
     const k = key orelse return 0;

@@ -74,6 +74,7 @@ const char* matcha_config_get_string(matcha_config_t cfg, const char* key);
 int64_t matcha_config_get_int(matcha_config_t cfg, const char* key);
 bool matcha_config_get_bool(matcha_config_t cfg, const char* key);
 uint32_t matcha_config_get_color(matcha_config_t cfg, const char* key);
+void matcha_config_set_system_dark(matcha_config_t cfg, bool is_dark);
 double matcha_config_get_float(matcha_config_t cfg, const char* key);
 
 // ── Editor ─────────────────────────────────────────────────────

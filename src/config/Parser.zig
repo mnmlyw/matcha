@@ -47,8 +47,10 @@ fn applyKeyValue(allocator: Allocator, config: *Config, key: []const u8, value: 
     } else if (std.mem.eql(u8, key, "appearance")) {
         if (std.mem.eql(u8, value, "dark")) {
             config.appearance = .dark;
-        } else {
+        } else if (std.mem.eql(u8, value, "light")) {
             config.appearance = .light;
+        } else {
+            config.appearance = .auto;
         }
     } else if (std.mem.eql(u8, key, "bg-color")) {
         config.bg_color = parseColor(value);

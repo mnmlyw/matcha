@@ -13,8 +13,8 @@ pub const Config = struct {
     line_numbers: bool = true,
     wrap_lines: bool = true,
 
-    // Appearance: "light" or "dark"
-    appearance: Appearance = .light,
+    // Appearance: "light", "dark", or "auto" (follows system)
+    appearance: Appearance = .auto,
 
     // Theme colors (set by applyAppearance)
     bg_color: u32 = 0xFAFAF8FF,
@@ -50,10 +50,12 @@ pub const Config = struct {
     pub const Appearance = enum {
         light,
         dark,
+        auto,
     };
 
     pub fn applyAppearance(self: *Config) void {
         switch (self.appearance) {
+            .auto => return, // resolved by Swift at runtime
             .light => {
                 self.bg_color = 0xFAFAF8FF;
                 self.fg_color = 0x2A2A2AFF;
