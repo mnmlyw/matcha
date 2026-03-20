@@ -147,6 +147,9 @@ void matcha_editor_replace_range(matcha_editor_t ed, uint32_t start, uint32_t en
 void matcha_editor_set_cursor_offset(matcha_editor_t ed, uint32_t pos);
 void matcha_editor_set_selection_offsets(matcha_editor_t ed, uint32_t start, uint32_t end);
 
+// Word completion: returns newline-separated matching words, caller frees with matcha_free_string.
+char* matcha_editor_get_completions(matcha_editor_t ed, uint32_t* prefix_len);
+
 // Undo/Redo
 void matcha_editor_undo(matcha_editor_t ed);
 void matcha_editor_redo(matcha_editor_t ed);

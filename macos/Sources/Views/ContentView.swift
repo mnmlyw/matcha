@@ -12,11 +12,20 @@ struct ContentView: View {
     @State private var wholeWord = false
     @State private var showGoToLine = false
     @State private var goToLineText = ""
+    @State private var showCompletion = false
+    @State private var completionWords: [String] = []
+    @State private var completionX: CGFloat = 0
+    @State private var completionY: CGFloat = 0
+    @State private var completionSelectedIndex: Int = 0
 
     private var editor: MatchaEditor? { tabManager.activeEditor }
     private var isKeyWindow: Bool { editor === MatchaEditor.activeEditor }
 
     var body: some View {
+        withNotificationHandlers(mainContent)
+    }
+
+    private var mainContent: some View {
         VStack(spacing: 0) {
             if tabManager.tabs.count > 1 {
                 TabBarView(tabManager: tabManager,
@@ -55,6 +64,8 @@ struct ContentView: View {
                     .padding(.top, 40)
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
+
+                completionOverlay
             }
 
             if let ed = editor {
@@ -65,100 +76,21 @@ struct ContentView: View {
             }
         }
         .background(Color(hex: tabManager.bgColor))
-        // Only handle notifications when this window is key (prevents cross-window routing)
-        .onReceive(NotificationCenter.default.publisher(for: .matchaNewTab)) { _ in
-            guard isKeyWindow else { return }
-            tabManager.newTab()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaCloseTab)) { _ in
-            guard isKeyWindow else { return }
-            tabManager.closeCurrentTab()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaNextTab)) { _ in
-            guard isKeyWindow else { return }
-            tabManager.selectNextTab()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaPrevTab)) { _ in
-            guard isKeyWindow else { return }
-            tabManager.selectPreviousTab()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile)) { _ in
-            guard isKeyWindow else { return }
-            editor?.newFile()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile)) { _ in
-            guard isKeyWindow else { return }
-            openFile()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveFile)) { _ in
-            guard isKeyWindow else { return }
-            saveFile()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile)) { _ in
-            guard isKeyWindow else { return }
-            saveAsFile()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind)) { _ in
-            guard isKeyWindow else { return }
-            showFindBar.toggle()
-            if showFindBar {
-                prefillSearchFromSelection()
-            } else {
-                showReplace = false
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext)) { _ in
-            guard isKeyWindow else { return }
-            if !showFindBar {
-                showFindBar = true
-                prefillSearchFromSelection()
-            }
-            findNext()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev)) { _ in
-            guard isKeyWindow else { return }
-            if !showFindBar {
-                showFindBar = true
-                prefillSearchFromSelection()
-            }
-            findPrev()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaGoToLine)) { _ in
-            guard isKeyWindow else { return }
-            goToLineText = ""
-            showGoToLine = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFilePath)) { notification in
-            guard isKeyWindow else { return }
-            if let path = notification.userInfo?["path"] as? String {
-                if let ed = editor, ed.info.filename == nil && !ed.info.modified {
-                    tabManager.openInCurrentTab(path: path)
-                } else {
-                    tabManager.openInNewTab(path: path)
-                }
-            }
-        }
-        .onAppear {
-            editor?.markActive()
+    }
 
-            // Handle pending file from "Open..." menu when no window was open
-            if let path = AppDelegate.pendingFilePath {
-                AppDelegate.pendingFilePath = nil
-                tabManager.openInCurrentTab(path: path)
-                return
-            }
-
-            // Handle command-line arguments (first window only)
-            guard !Self.didHandleLaunchFile else { return }
-            Self.didHandleLaunchFile = true
-            for arg in ProcessInfo.processInfo.arguments.dropFirst() {
-                let path = arg.hasPrefix("/") ? arg
-                    : FileManager.default.currentDirectoryPath + "/" + arg
-                if FileManager.default.fileExists(atPath: path) {
-                    tabManager.openInCurrentTab(path: path)
-                    break
-                }
-            }
+    @ViewBuilder
+    private var completionOverlay: some View {
+        if showCompletion {
+            CompletionPopupView(
+                words: completionWords,
+                selectedIndex: completionSelectedIndex,
+                bgColor: tabManager.chromeBg,
+                fgColor: tabManager.chromeFg,
+                dimColor: tabManager.chromeDim,
+                cursorX: completionX,
+                cursorY: completionY
+            )
+            .position(x: completionX + 100, y: completionY)
         }
     }
 
@@ -232,6 +164,128 @@ struct ContentView: View {
                                replacement: replaceText,
                                caseSensitive: caseSensitive,
                                wholeWord: wholeWord)
+    }
+
+    // MARK: - Notification Handlers
+
+    private func withNotificationHandlers<V: View>(_ content: V) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .matchaNewTab)) { _ in
+                guard isKeyWindow else { return }
+                tabManager.newTab()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaCloseTab)) { _ in
+                guard isKeyWindow else { return }
+                tabManager.closeCurrentTab()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaNextTab)) { _ in
+                guard isKeyWindow else { return }
+                tabManager.selectNextTab()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaPrevTab)) { _ in
+                guard isKeyWindow else { return }
+                tabManager.selectPreviousTab()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile)) { _ in
+                guard isKeyWindow else { return }
+                editor?.newFile()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile)) { _ in
+                guard isKeyWindow else { return }
+                openFile()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaSaveFile)) { _ in
+                guard isKeyWindow else { return }
+                saveFile()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile)) { _ in
+                guard isKeyWindow else { return }
+                saveAsFile()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind)) { _ in
+                guard isKeyWindow else { return }
+                showFindBar.toggle()
+                if showFindBar {
+                    prefillSearchFromSelection()
+                } else {
+                    showReplace = false
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext)) { _ in
+                guard isKeyWindow else { return }
+                if !showFindBar {
+                    showFindBar = true
+                    prefillSearchFromSelection()
+                }
+                findNext()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev)) { _ in
+                guard isKeyWindow else { return }
+                if !showFindBar {
+                    showFindBar = true
+                    prefillSearchFromSelection()
+                }
+                findPrev()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaGoToLine)) { _ in
+                guard isKeyWindow else { return }
+                goToLineText = ""
+                showGoToLine = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaShowCompletion)) { notification in
+                guard isKeyWindow else { return }
+                if let words = notification.userInfo?["words"] as? [String] {
+                    completionWords = words
+                    completionX = (notification.userInfo?["x"] as? CGFloat) ?? 100
+                    completionY = (notification.userInfo?["y"] as? CGFloat) ?? 100
+                    completionSelectedIndex = 0
+                    showCompletion = true
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaDismissCompletion)) { _ in
+                showCompletion = false
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaCompletionNavigate)) { notification in
+                if let index = notification.userInfo?["index"] as? Int {
+                    completionSelectedIndex = index
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFilePath)) { notification in
+                guard isKeyWindow else { return }
+                if let path = notification.userInfo?["path"] as? String {
+                    if let ed = editor, ed.info.filename == nil && !ed.info.modified {
+                        tabManager.openInCurrentTab(path: path)
+                    } else {
+                        tabManager.openInNewTab(path: path)
+                    }
+                }
+            }
+            .onAppear {
+                handleOnAppear()
+            }
+    }
+
+    private func handleOnAppear() {
+        editor?.markActive()
+
+        // Handle pending file from "Open..." menu when no window was open
+        if let path = AppDelegate.pendingFilePath {
+            AppDelegate.pendingFilePath = nil
+            tabManager.openInCurrentTab(path: path)
+            return
+        }
+
+        // Handle command-line arguments (first window only)
+        guard !Self.didHandleLaunchFile else { return }
+        Self.didHandleLaunchFile = true
+        for arg in ProcessInfo.processInfo.arguments.dropFirst() {
+            let path = arg.hasPrefix("/") ? arg
+                : FileManager.default.currentDirectoryPath + "/" + arg
+            if FileManager.default.fileExists(atPath: path) {
+                tabManager.openInCurrentTab(path: path)
+                break
+            }
+        }
     }
 }
 

@@ -997,6 +997,82 @@ pub const Editor = struct {
         try self.insertTextLiteral(text);
     }
 
+    // ── Word Completion ───────────────────────────────────────
+
+    /// Returns newline-separated list of buffer words matching the prefix at cursor.
+    /// prefix_len_out is set to the byte length of the prefix. Caller must free result.
+    pub fn getCompletions(self: *Editor, alloc: Allocator, prefix_len_out: *u32) ?[]u8 {
+        const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        if (pos == 0) return null;
+
+        // Walk backward from cursor to find prefix start
+        var prefix_start = pos;
+        while (prefix_start > 0) {
+            const b = self.buffer.byteAt(prefix_start - 1) orelse break;
+            if (!isWordByte(b)) break;
+            prefix_start -= 1;
+        }
+        const prefix_len = pos - prefix_start;
+        if (prefix_len == 0) return null;
+        prefix_len_out.* = prefix_len;
+
+        // Get prefix bytes
+        const prefix = self.buffer.getRange(self.allocator, prefix_start, pos) catch return null;
+        defer self.allocator.free(prefix);
+
+        // Get full buffer content
+        const content = self.buffer.getContent(self.allocator) catch return null;
+        defer self.allocator.free(content);
+
+        // Scan for matching words (deduplicated)
+        var seen = std.StringHashMapUnmanaged(void){};
+        defer {
+            var it = seen.iterator();
+            while (it.next()) |entry| {
+                alloc.free(entry.key_ptr.*);
+            }
+            seen.deinit(alloc);
+        }
+
+        var results: std.ArrayListUnmanaged(u8) = .{};
+        defer results.deinit(alloc);
+        var count: u32 = 0;
+        const max_results: u32 = 50;
+
+        var i: usize = 0;
+        while (i < content.len and count < max_results) {
+            if (!isWordByte(content[i])) {
+                i += 1;
+                continue;
+            }
+            const word_start = i;
+            while (i < content.len and isWordByte(content[i])) i += 1;
+            const word = content[word_start..i];
+
+            // Must be longer than prefix and start with prefix
+            if (word.len <= prefix.len) continue;
+            if (!std.mem.startsWith(u8, word, prefix)) continue;
+
+            // Skip if it's the same position as cursor
+            if (word_start == prefix_start) continue;
+
+            // Dedup
+            if (seen.contains(word)) continue;
+            const key = alloc.dupe(u8, word) catch continue;
+            seen.put(alloc, key, {}) catch {
+                alloc.free(key);
+                continue;
+            };
+
+            if (count > 0) results.append(alloc, '\n') catch continue;
+            results.appendSlice(alloc, word) catch continue;
+            count += 1;
+        }
+
+        if (count == 0) return null;
+        return alloc.dupe(u8, results.items) catch null;
+    }
+
     // ── Undo/Redo ──────────────────────────────────────────────
 
     pub fn undo(self: *Editor) !void {
