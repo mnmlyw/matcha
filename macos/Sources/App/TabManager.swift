@@ -102,6 +102,19 @@ class TabManager: ObservableObject {
         activeTab?.editor.markActive()
     }
 
+    func moveTab(from: Int, to: Int) {
+        guard from != to, from >= 0, from < tabs.count, to >= 0, to < tabs.count else { return }
+        let tab = tabs.remove(at: from)
+        tabs.insert(tab, at: to)
+        if activeIndex == from {
+            activeIndex = to
+        } else if from < to {
+            if activeIndex > from && activeIndex <= to { activeIndex -= 1 }
+        } else {
+            if activeIndex >= to && activeIndex < from { activeIndex += 1 }
+        }
+    }
+
     func selectNextTab() {
         if tabs.count > 1 {
             selectTab(at: (activeIndex + 1) % tabs.count)
