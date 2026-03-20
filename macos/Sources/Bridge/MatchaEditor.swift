@@ -249,6 +249,19 @@ class MatchaEditor: ObservableObject {
         updateInfo()
     }
 
+    // MARK: - Word Completion
+
+    func getCompletions() -> (words: [String], prefixLen: Int)? {
+        guard let h = handle else { return nil }
+        var prefixLen: UInt32 = 0
+        guard let cStr = matcha_editor_get_completions(h, &prefixLen) else { return nil }
+        let str = String(cString: cStr)
+        matcha_free_string(cStr)
+        let words = str.split(separator: "\n").map(String.init)
+        guard !words.isEmpty else { return nil }
+        return (words: words, prefixLen: Int(prefixLen))
+    }
+
     // MARK: - Undo/Redo
 
     func undo() { guard let h = handle else { return }; matcha_editor_undo(h); updateInfo() }

@@ -426,6 +426,19 @@ export fn matcha_free_string(str: ?[*:0]u8) void {
     }
 }
 
+// ── Word Completion ─────────────────────────────────────────
+
+export fn matcha_editor_get_completions(ed: ?*Editor, prefix_len: ?*u32) ?[*:0]u8 {
+    const e = ed orelse return null;
+    var plen: u32 = 0;
+    const result = e.getCompletions(c_allocator, &plen) orelse return null;
+    defer c_allocator.free(result);
+    if (prefix_len) |out| out.* = plen;
+    const cstr = c_allocator.allocSentinel(u8, result.len, 0) catch return null;
+    @memcpy(cstr[0..result.len], result);
+    return cstr.ptr;
+}
+
 // ── Undo/Redo ──────────────────────────────────────────────────
 
 export fn matcha_editor_undo(ed: ?*Editor) void {
