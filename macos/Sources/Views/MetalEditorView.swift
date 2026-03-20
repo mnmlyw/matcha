@@ -437,15 +437,27 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 NotificationCenter.default.post(name: .matchaCompletionNavigate, object: nil,
                                                 userInfo: ["index": completionSelectedIndex])
                 return
-            case 36: // Enter
+            case 48: // Tab — accept completion
                 acceptCompletion()
                 return
             case 53: // Escape
                 dismissCompletion()
                 return
-            default:
+            case 36: // Enter — dismiss and insert newline
                 dismissCompletion()
-                // Fall through to normal key handling
+                // Fall through to normal handling
+            case 51: // Backspace — let it process, then re-query
+                break // fall through, re-query below
+            default:
+                // For word characters, fall through to insert then re-query
+                // For non-word characters (space, punctuation), dismiss
+                if let chars = event.characters, let ch = chars.unicodeScalars.first {
+                    if !CharacterSet.alphanumerics.contains(ch) && ch != "_" {
+                        dismissCompletion()
+                    }
+                } else {
+                    dismissCompletion()
+                }
             }
         }
 
@@ -501,6 +513,24 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             editor.updateInfo()
             requestRedraw()
             return
+        }
+
+        // Re-query completions if popup was/is open (filter-as-you-type)
+        if showCompletion {
+            if let result = editor.getCompletions(), !result.words.isEmpty {
+                completionWords = result.words
+                completionPrefixLen = result.prefixLen
+                completionSelectedIndex = 0
+                let offset = editor.getCursorOffset()
+                let rect = editor.rectForOffset(offset) ?? .zero
+                NotificationCenter.default.post(name: .matchaShowCompletion, object: nil,
+                                                userInfo: ["words": completionWords,
+                                                           "prefixLen": completionPrefixLen,
+                                                           "x": rect.origin.x,
+                                                           "y": rect.origin.y + rect.height])
+            } else {
+                dismissCompletion()
+            }
         }
     }
 
