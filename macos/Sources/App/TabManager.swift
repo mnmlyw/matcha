@@ -1,8 +1,10 @@
 import Foundation
+import Combine
 import MatchaKit
 
 class TabManager: ObservableObject {
     let config: MatchaConfig
+    private var cancellables = Set<AnyCancellable>()
 
     struct Tab: Identifiable {
         let id = UUID()
@@ -40,6 +42,13 @@ class TabManager: ObservableObject {
         let editor = MatchaEditor(config: cfg)
         editor.markActive()
         tabs.append(Tab(editor: editor))
+        observeEditor(editor)
+    }
+
+    private func observeEditor(_ editor: MatchaEditor) {
+        editor.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }.store(in: &cancellables)
     }
 
     func newTab() {
@@ -47,6 +56,7 @@ class TabManager: ObservableObject {
         tabs.append(Tab(editor: editor))
         activeIndex = tabs.count - 1
         activeTab?.editor.markActive()
+        observeEditor(editor)
     }
 
     func openInNewTab(path: String) {
@@ -55,6 +65,7 @@ class TabManager: ObservableObject {
         tabs.append(Tab(editor: editor))
         activeIndex = tabs.count - 1
         activeTab?.editor.markActive()
+        observeEditor(editor)
     }
 
     func openInCurrentTab(path: String) {

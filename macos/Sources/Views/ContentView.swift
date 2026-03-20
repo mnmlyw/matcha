@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var completionY: CGFloat = 0
     @State private var completionSelectedIndex: Int = 0
     @State private var showCommandPalette = false
+    @State private var showFileFinder = false
 
     private var editor: MatchaEditor? { tabManager.activeEditor }
     private var isKeyWindow: Bool { editor === MatchaEditor.activeEditor }
@@ -68,6 +69,7 @@ struct ContentView: View {
 
                 completionOverlay
                 commandPaletteOverlay
+                fileFinderOverlay
             }
 
             if let ed = editor {
@@ -107,6 +109,34 @@ struct ContentView: View {
             )
             .padding(.top, 40)
         }
+    }
+
+    @ViewBuilder
+    private var fileFinderOverlay: some View {
+        if showFileFinder {
+            FileFinderView(
+                isVisible: $showFileFinder,
+                rootPath: projectRoot,
+                onOpen: { path in
+                    if let ed = editor, ed.info.filename == nil && !ed.info.modified {
+                        tabManager.openInCurrentTab(path: path)
+                    } else {
+                        tabManager.openInNewTab(path: path)
+                    }
+                },
+                bgColor: tabManager.chromeBg,
+                fgColor: tabManager.chromeFg
+            )
+            .padding(.top, 40)
+        }
+    }
+
+    private var projectRoot: String {
+        // Use the directory of the current file, or CWD
+        if let filename = editor?.info.filename {
+            return (filename as NSString).deletingLastPathComponent
+        }
+        return FileManager.default.currentDirectoryPath
     }
 
     private func buildCommandList() -> [PaletteCommandItem] {
@@ -297,6 +327,10 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .matchaCommandPalette)) { _ in
                 guard isKeyWindow else { return }
                 showCommandPalette = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaFileFinder)) { _ in
+                guard isKeyWindow else { return }
+                showFileFinder = true
             }
             .onReceive(NotificationCenter.default.publisher(for: .matchaShowCompletion)) { notification in
                 guard isKeyWindow else { return }

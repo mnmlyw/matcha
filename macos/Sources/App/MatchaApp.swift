@@ -89,6 +89,11 @@ struct MatchaApp: App {
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
 
+                Button("Open File by Name...") {
+                    NotificationCenter.default.post(name: .matchaFileFinder, object: nil)
+                }
+                .keyboardShortcut("p", modifiers: .command)
+
                 Divider()
 
                 Button("Next Tab") {
@@ -194,4 +199,5 @@ extension Notification.Name {
     static let matchaDismissCompletion = Notification.Name("matchaDismissCompletion")
     static let matchaCompletionNavigate = Notification.Name("matchaCompletionNavigate")
     static let matchaCommandPalette = Notification.Name("matchaCommandPalette")
+    static let matchaFileFinder = Notification.Name("matchaFileFinder")
 }
