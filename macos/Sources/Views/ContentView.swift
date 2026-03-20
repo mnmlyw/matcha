@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var completionX: CGFloat = 0
     @State private var completionY: CGFloat = 0
     @State private var completionSelectedIndex: Int = 0
+    @State private var showCommandPalette = false
 
     private var editor: MatchaEditor? { tabManager.activeEditor }
     private var isKeyWindow: Bool { editor === MatchaEditor.activeEditor }
@@ -66,6 +67,7 @@ struct ContentView: View {
                 }
 
                 completionOverlay
+                commandPaletteOverlay
             }
 
             if let ed = editor {
@@ -92,6 +94,58 @@ struct ContentView: View {
             )
             .position(x: completionX + 100, y: completionY)
         }
+    }
+
+    @ViewBuilder
+    private var commandPaletteOverlay: some View {
+        if showCommandPalette {
+            CommandPaletteView(
+                isVisible: $showCommandPalette,
+                commands: buildCommandList(),
+                bgColor: tabManager.chromeBg,
+                fgColor: tabManager.chromeFg
+            )
+            .padding(.top, 40)
+        }
+    }
+
+    private func buildCommandList() -> [PaletteCommandItem] {
+        [
+            PaletteCommandItem(id: "new", title: "New File", subtitle: "Cmd+N", keywords: "new file create",
+                action: { NotificationCenter.default.post(name: .matchaNewFile, object: nil) }),
+            PaletteCommandItem(id: "newTab", title: "New Tab", subtitle: "Cmd+T", keywords: "new tab",
+                action: { NotificationCenter.default.post(name: .matchaNewTab, object: nil) }),
+            PaletteCommandItem(id: "open", title: "Open...", subtitle: "Cmd+O", keywords: "open file browse",
+                action: { NotificationCenter.default.post(name: .matchaOpenFile, object: nil) }),
+            PaletteCommandItem(id: "save", title: "Save", subtitle: "Cmd+S", keywords: "save write",
+                action: { NotificationCenter.default.post(name: .matchaSaveFile, object: nil) }),
+            PaletteCommandItem(id: "saveAs", title: "Save As...", subtitle: "Cmd+Shift+S", keywords: "save as export",
+                action: { NotificationCenter.default.post(name: .matchaSaveAsFile, object: nil) }),
+            PaletteCommandItem(id: "closeTab", title: "Close Tab", subtitle: "Cmd+W", keywords: "close tab",
+                action: { NotificationCenter.default.post(name: .matchaCloseTab, object: nil) }),
+            PaletteCommandItem(id: "find", title: "Find", subtitle: "Cmd+F", keywords: "find search",
+                action: { NotificationCenter.default.post(name: .matchaToggleFind, object: nil) }),
+            PaletteCommandItem(id: "goToLine", title: "Go to Line...", subtitle: "Cmd+L", keywords: "go to line jump",
+                action: { NotificationCenter.default.post(name: .matchaGoToLine, object: nil) }),
+            PaletteCommandItem(id: "toggleComment", title: "Toggle Comment", subtitle: "Cmd+/", keywords: "comment uncomment",
+                action: { MatchaEditor.activeEditor?.toggleComment() }),
+            PaletteCommandItem(id: "duplicateLine", title: "Duplicate Line", subtitle: "Cmd+D", keywords: "duplicate copy line",
+                action: { MatchaEditor.activeEditor?.duplicateLine() }),
+            PaletteCommandItem(id: "moveLineUp", title: "Move Line Up", subtitle: "Cmd+Opt+Up", keywords: "move line up",
+                action: { MatchaEditor.activeEditor?.moveLineUp() }),
+            PaletteCommandItem(id: "moveLineDown", title: "Move Line Down", subtitle: "Cmd+Opt+Down", keywords: "move line down",
+                action: { MatchaEditor.activeEditor?.moveLineDown() }),
+            PaletteCommandItem(id: "undo", title: "Undo", subtitle: "Cmd+Z", keywords: "undo revert",
+                action: { MatchaEditor.activeEditor?.undo() }),
+            PaletteCommandItem(id: "redo", title: "Redo", subtitle: "Cmd+Shift+Z", keywords: "redo",
+                action: { MatchaEditor.activeEditor?.redo() }),
+            PaletteCommandItem(id: "selectAll", title: "Select All", subtitle: "Cmd+A", keywords: "select all",
+                action: { MatchaEditor.activeEditor?.selectAll() }),
+            PaletteCommandItem(id: "nextTab", title: "Next Tab", subtitle: "Cmd+Shift+]", keywords: "next tab switch",
+                action: { NotificationCenter.default.post(name: .matchaNextTab, object: nil) }),
+            PaletteCommandItem(id: "prevTab", title: "Previous Tab", subtitle: "Cmd+Shift+[", keywords: "previous tab switch",
+                action: { NotificationCenter.default.post(name: .matchaPrevTab, object: nil) }),
+        ]
     }
 
     private func openFile() {
@@ -169,6 +223,10 @@ struct ContentView: View {
     // MARK: - Notification Handlers
 
     private func withNotificationHandlers<V: View>(_ content: V) -> some View {
+        withOverlayNotifications(withCoreNotifications(content))
+    }
+
+    private func withCoreNotifications<V: View>(_ content: V) -> some View {
         content
             .onReceive(NotificationCenter.default.publisher(for: .matchaNewTab)) { _ in
                 guard isKeyWindow else { return }
@@ -202,54 +260,6 @@ struct ContentView: View {
                 guard isKeyWindow else { return }
                 saveAsFile()
             }
-            .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind)) { _ in
-                guard isKeyWindow else { return }
-                showFindBar.toggle()
-                if showFindBar {
-                    prefillSearchFromSelection()
-                } else {
-                    showReplace = false
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext)) { _ in
-                guard isKeyWindow else { return }
-                if !showFindBar {
-                    showFindBar = true
-                    prefillSearchFromSelection()
-                }
-                findNext()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev)) { _ in
-                guard isKeyWindow else { return }
-                if !showFindBar {
-                    showFindBar = true
-                    prefillSearchFromSelection()
-                }
-                findPrev()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .matchaGoToLine)) { _ in
-                guard isKeyWindow else { return }
-                goToLineText = ""
-                showGoToLine = true
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .matchaShowCompletion)) { notification in
-                guard isKeyWindow else { return }
-                if let words = notification.userInfo?["words"] as? [String] {
-                    completionWords = words
-                    completionX = (notification.userInfo?["x"] as? CGFloat) ?? 100
-                    completionY = (notification.userInfo?["y"] as? CGFloat) ?? 100
-                    completionSelectedIndex = 0
-                    showCompletion = true
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .matchaDismissCompletion)) { _ in
-                showCompletion = false
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .matchaCompletionNavigate)) { notification in
-                if let index = notification.userInfo?["index"] as? Int {
-                    completionSelectedIndex = index
-                }
-            }
             .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFilePath)) { notification in
                 guard isKeyWindow else { return }
                 if let path = notification.userInfo?["path"] as? String {
@@ -260,8 +270,48 @@ struct ContentView: View {
                     }
                 }
             }
-            .onAppear {
-                handleOnAppear()
+            .onAppear { handleOnAppear() }
+    }
+
+    private func withOverlayNotifications<V: View>(_ content: V) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .matchaToggleFind)) { _ in
+                guard isKeyWindow else { return }
+                showFindBar.toggle()
+                if showFindBar { prefillSearchFromSelection() } else { showReplace = false }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaFindNext)) { _ in
+                guard isKeyWindow else { return }
+                if !showFindBar { showFindBar = true; prefillSearchFromSelection() }
+                findNext()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaFindPrev)) { _ in
+                guard isKeyWindow else { return }
+                if !showFindBar { showFindBar = true; prefillSearchFromSelection() }
+                findPrev()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaGoToLine)) { _ in
+                guard isKeyWindow else { return }
+                goToLineText = ""; showGoToLine = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaCommandPalette)) { _ in
+                guard isKeyWindow else { return }
+                showCommandPalette = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaShowCompletion)) { notification in
+                guard isKeyWindow else { return }
+                if let words = notification.userInfo?["words"] as? [String] {
+                    completionWords = words
+                    completionX = (notification.userInfo?["x"] as? CGFloat) ?? 100
+                    completionY = (notification.userInfo?["y"] as? CGFloat) ?? 100
+                    completionSelectedIndex = 0; showCompletion = true
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaDismissCompletion)) { _ in
+                showCompletion = false
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaCompletionNavigate)) { notification in
+                if let index = notification.userInfo?["index"] as? Int { completionSelectedIndex = index }
             }
     }
 
