@@ -84,6 +84,7 @@ pub fn build(b: *std.Build) void {
         \\  macos/Sources/Views/FindBarView.swift \
         \\  macos/Sources/Views/GoToLineView.swift \
         \\  macos/Sources/Views/CompletionPopupView.swift \
+        \\  macos/Sources/Views/CommandPaletteView.swift \
         \\  macos/Sources/Views/TabBarView.swift \
         \\  macos/Sources/Views/StatusBarView.swift \
         \\  macos/Sources/Renderer/MetalRenderer.swift \

@@ -84,6 +84,11 @@ struct MatchaApp: App {
                 }
                 .keyboardShortcut("l", modifiers: .command)
 
+                Button("Command Palette...") {
+                    NotificationCenter.default.post(name: .matchaCommandPalette, object: nil)
+                }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+
                 Divider()
 
                 Button("Next Tab") {
@@ -188,4 +193,5 @@ extension Notification.Name {
     static let matchaShowCompletion = Notification.Name("matchaShowCompletion")
     static let matchaDismissCompletion = Notification.Name("matchaDismissCompletion")
     static let matchaCompletionNavigate = Notification.Name("matchaCompletionNavigate")
+    static let matchaCommandPalette = Notification.Name("matchaCommandPalette")
 }
