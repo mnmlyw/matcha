@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TabBarView: View {
     @ObservedObject var tabManager: TabManager
@@ -6,6 +7,8 @@ struct TabBarView: View {
     let chromeActiveBg: UInt32
     let chromeFg: UInt32
     let chromeDim: UInt32
+
+    @State private var draggedTabId: UUID?
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -21,11 +24,44 @@ struct TabBarView: View {
                         fgColor: chromeFg,
                         dimColor: chromeDim
                     )
+                    .onDrag {
+                        draggedTabId = tab.id
+                        return NSItemProvider(object: tab.id.uuidString as NSString)
+                    }
+                    .onDrop(of: [.text], delegate: TabDropDelegate(
+                        tabManager: tabManager,
+                        targetIndex: index,
+                        draggedTabId: $draggedTabId
+                    ))
                 }
             }
         }
         .frame(height: 30)
         .background(Color(hex: chromeBg))
+    }
+}
+
+private struct TabDropDelegate: DropDelegate {
+    let tabManager: TabManager
+    let targetIndex: Int
+    @Binding var draggedTabId: UUID?
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedTabId = nil
+        return true
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedId = draggedTabId,
+              let fromIndex = tabManager.tabs.firstIndex(where: { $0.id == draggedId }),
+              fromIndex != targetIndex else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            tabManager.moveTab(from: fromIndex, to: targetIndex)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
     }
 }
 
