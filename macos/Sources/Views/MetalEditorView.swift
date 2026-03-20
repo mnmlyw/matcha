@@ -17,6 +17,14 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     var hangulCellWidth: CGFloat = 14.0
     var font: NSFont
     private var inputHandled = false
+    // Word completion state
+    var completionWords: [String] = []
+    var completionPrefixLen: Int = 0
+    var completionSelectedIndex: Int = 0
+    var showCompletion: Bool = false
+    // Inline ghost text prediction
+    var inlineHint: String? = nil
+    var inlineHintPrefixLen: Int = 0
     private var markedByteRange: Range<UInt32>?
     private var markedSelectedRange = NSRange(location: NSNotFound, length: 0)
 
@@ -360,7 +368,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     func draw(in view: MTKView) {
         editor.prepareRender()
-        renderer?.draw(in: view, editor: editor, cursorVisible: cursorVisible)
+        renderer?.draw(in: view, editor: editor, cursorVisible: cursorVisible, inlineHint: inlineHint)
     }
 
     // MARK: - Cursor Blink
@@ -381,9 +389,104 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     // MARK: - Keyboard Input
 
+    private func dismissCompletion() {
+        if showCompletion {
+            showCompletion = false
+            NotificationCenter.default.post(name: .matchaDismissCompletion, object: nil)
+        }
+    }
+
+    private func triggerCompletion() {
+        guard let result = editor.getCompletions() else { return }
+        completionWords = result.words
+        completionPrefixLen = result.prefixLen
+        completionSelectedIndex = 0
+        showCompletion = true
+
+        // Get cursor rect for positioning
+        let offset = editor.getCursorOffset()
+        let rect = editor.rectForOffset(offset) ?? .zero
+        NotificationCenter.default.post(name: .matchaShowCompletion, object: nil,
+                                        userInfo: ["words": completionWords,
+                                                   "prefixLen": completionPrefixLen,
+                                                   "x": rect.origin.x,
+                                                   "y": rect.origin.y + rect.height])
+    }
+
+    private func refreshInlineHint() {
+        if let result = editor.getCompletions(), !result.words.isEmpty {
+            let best = result.words[0]
+            let suffix = String(best.dropFirst(result.prefixLen))
+            if !suffix.isEmpty {
+                inlineHint = suffix
+                inlineHintPrefixLen = result.prefixLen
+            } else {
+                inlineHint = nil
+            }
+        } else {
+            inlineHint = nil
+        }
+        requestRedraw()
+    }
+
+    private func acceptInlineHint() {
+        guard let hint = inlineHint else { return }
+        editor.insert(text: hint)
+        inlineHint = nil
+        requestRedraw()
+    }
+
+    private func acceptCompletion() {
+        guard showCompletion, completionSelectedIndex < completionWords.count else { return }
+        let word = completionWords[completionSelectedIndex]
+        let cursorOffset = editor.getCursorOffset()
+        let prefixStart = cursorOffset - UInt32(completionPrefixLen)
+        editor.replaceRange(start: prefixStart, end: cursorOffset, text: word)
+        dismissCompletion()
+        requestRedraw()
+    }
+
     override func keyDown(with event: NSEvent) {
         editor.markActive()
         resetCursorBlink()
+
+        // Handle completion popup keys
+        if showCompletion {
+            switch Int(event.keyCode) {
+            case 125: // Down
+                completionSelectedIndex = (completionSelectedIndex + 1) % min(completionWords.count, 10)
+                NotificationCenter.default.post(name: .matchaCompletionNavigate, object: nil,
+                                                userInfo: ["index": completionSelectedIndex])
+                return
+            case 126: // Up
+                completionSelectedIndex = (completionSelectedIndex - 1 + min(completionWords.count, 10)) % min(completionWords.count, 10)
+                NotificationCenter.default.post(name: .matchaCompletionNavigate, object: nil,
+                                                userInfo: ["index": completionSelectedIndex])
+                return
+            case 48: // Tab — accept completion
+                acceptCompletion()
+                return
+            case 53: // Escape
+                dismissCompletion()
+                return
+            case 36: // Enter — dismiss and insert newline
+                dismissCompletion()
+                // Fall through to normal handling
+            case 51: // Backspace — let it process, then re-query
+                break // fall through, re-query below
+            default:
+                // For word characters, fall through to insert then re-query
+                // For non-word characters (space, punctuation), dismiss
+                if let chars = event.characters, let ch = chars.unicodeScalars.first {
+                    if !CharacterSet.alphanumerics.contains(ch) && ch != "_" {
+                        dismissCompletion()
+                    }
+                } else {
+                    dismissCompletion()
+                }
+            }
+        }
+
         let modifiers = event.modifierFlags
 
         let hasCmd = modifiers.contains(.command)
@@ -420,6 +523,18 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             }
         }
 
+        // Tab: accept inline hint if showing (before normal tab handling)
+        if event.keyCode == 48 && !modifiers.contains(.command) && !showCompletion && inlineHint != nil {
+            acceptInlineHint()
+            return
+        }
+
+        // Escape: trigger word completion (when no modifiers)
+        if event.keyCode == 53 && !modifiers.contains(.command) {
+            triggerCompletion()
+            return
+        }
+
         inputHandled = false
         interpretKeyEvents([event])
         if inputHandled {
@@ -431,11 +546,37 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             requestRedraw()
             return
         }
+
+        // Re-query completions if popup was/is open (filter-as-you-type)
+        if showCompletion {
+            if let result = editor.getCompletions(), !result.words.isEmpty {
+                completionWords = result.words
+                completionPrefixLen = result.prefixLen
+                completionSelectedIndex = 0
+                let offset = editor.getCursorOffset()
+                let rect = editor.rectForOffset(offset) ?? .zero
+                NotificationCenter.default.post(name: .matchaShowCompletion, object: nil,
+                                                userInfo: ["words": completionWords,
+                                                           "prefixLen": completionPrefixLen,
+                                                           "x": rect.origin.x,
+                                                           "y": rect.origin.y + rect.height])
+            } else {
+                dismissCompletion()
+            }
+        }
     }
 
     override func doCommand(by selector: Selector) {
         let handled = handleTextCommand(named: NSStringFromSelector(selector))
         inputHandled = handled
+        if handled {
+            let name = NSStringFromSelector(selector)
+            if name.contains("delete") || name.contains("Backward") || name.contains("Forward") {
+                refreshInlineHint()
+            } else {
+                inlineHint = nil
+            }
+        }
     }
 
     override func flagsChanged(with event: NSEvent) {}
@@ -459,7 +600,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
         clearMarkedTextState()
         inputHandled = true
-        requestRedraw()
+        refreshInlineHint()
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {

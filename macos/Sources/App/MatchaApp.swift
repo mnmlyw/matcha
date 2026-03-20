@@ -185,4 +185,7 @@ extension Notification.Name {
     static let matchaFindPrev = Notification.Name("matchaFindPrev")
     static let matchaGoToLine = Notification.Name("matchaGoToLine")
     static let matchaOpenFilePath = Notification.Name("matchaOpenFilePath")
+    static let matchaShowCompletion = Notification.Name("matchaShowCompletion")
+    static let matchaDismissCompletion = Notification.Name("matchaDismissCompletion")
+    static let matchaCompletionNavigate = Notification.Name("matchaCompletionNavigate")
 }
