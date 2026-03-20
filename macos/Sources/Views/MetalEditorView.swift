@@ -22,6 +22,9 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     var completionPrefixLen: Int = 0
     var completionSelectedIndex: Int = 0
     var showCompletion: Bool = false
+    // Inline ghost text prediction
+    var inlineHint: String? = nil
+    var inlineHintPrefixLen: Int = 0
     private var markedByteRange: Range<UInt32>?
     private var markedSelectedRange = NSRange(location: NSNotFound, length: 0)
 
@@ -365,7 +368,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     func draw(in view: MTKView) {
         editor.prepareRender()
-        renderer?.draw(in: view, editor: editor, cursorVisible: cursorVisible)
+        renderer?.draw(in: view, editor: editor, cursorVisible: cursorVisible, inlineHint: inlineHint)
     }
 
     // MARK: - Cursor Blink
@@ -408,6 +411,29 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                                                    "prefixLen": completionPrefixLen,
                                                    "x": rect.origin.x,
                                                    "y": rect.origin.y + rect.height])
+    }
+
+    private func refreshInlineHint() {
+        if let result = editor.getCompletions(), !result.words.isEmpty {
+            let best = result.words[0]
+            let suffix = String(best.dropFirst(result.prefixLen))
+            if !suffix.isEmpty {
+                inlineHint = suffix
+                inlineHintPrefixLen = result.prefixLen
+            } else {
+                inlineHint = nil
+            }
+        } else {
+            inlineHint = nil
+        }
+        requestRedraw()
+    }
+
+    private func acceptInlineHint() {
+        guard let hint = inlineHint else { return }
+        editor.insert(text: hint)
+        inlineHint = nil
+        requestRedraw()
     }
 
     private func acceptCompletion() {
@@ -497,6 +523,12 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             }
         }
 
+        // Tab: accept inline hint if showing (before normal tab handling)
+        if event.keyCode == 48 && !modifiers.contains(.command) && !showCompletion && inlineHint != nil {
+            acceptInlineHint()
+            return
+        }
+
         // Escape: trigger word completion (when no modifiers)
         if event.keyCode == 53 && !modifiers.contains(.command) {
             triggerCompletion()
@@ -537,6 +569,14 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     override func doCommand(by selector: Selector) {
         let handled = handleTextCommand(named: NSStringFromSelector(selector))
         inputHandled = handled
+        if handled {
+            let name = NSStringFromSelector(selector)
+            if name.contains("delete") || name.contains("Backward") || name.contains("Forward") {
+                refreshInlineHint()
+            } else {
+                inlineHint = nil
+            }
+        }
     }
 
     override func flagsChanged(with event: NSEvent) {}
@@ -560,7 +600,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
         clearMarkedTextState()
         inputHandled = true
-        requestRedraw()
+        refreshInlineHint()
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {

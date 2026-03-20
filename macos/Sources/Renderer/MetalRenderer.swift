@@ -89,6 +89,8 @@ class MetalRenderer {
     private var gutterVertexBuffer: MTLBuffer?
     private var cursorVertexBuffer: MTLBuffer?
     private var lineNumberVertexBuffer: MTLBuffer?
+    private var ghostQuads: [QuadVertex] = []
+    private var ghostVertexBuffer: MTLBuffer?
     private var viewportBuffer: MTLBuffer?
 
     init?(device: MTLDevice, view: MTKView, font: NSFont, cellWidth: Float, cellHeight: Float, scaleFactor: Float = 2.0) {
@@ -141,7 +143,7 @@ class MetalRenderer {
         self.viewportBuffer = device.makeBuffer(length: MemoryLayout<ViewportUniforms>.size, options: .storageModeShared)
     }
 
-    func draw(in view: MTKView, editor: MatchaEditor, cursorVisible: Bool) {
+    func draw(in view: MTKView, editor: MatchaEditor, cursorVisible: Bool, inlineHint: String? = nil) {
         guard let drawable = view.currentDrawable,
               let renderPassDescriptor = view.currentRenderPassDescriptor,
               let commandBuffer = commandQueue.makeCommandBuffer() else { return }
@@ -281,6 +283,42 @@ class MetalRenderer {
             if let buffer = Self.uploadVertices(cursorQuads, device: device, into: &cursorVertexBuffer) {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cursorQuads.count)
+            }
+        }
+
+        // Pass 6: Inline ghost text prediction
+        if let hint = inlineHint, !hint.isEmpty, !cursors.isEmpty {
+            encoder.setRenderPipelineState(textPipeline)
+            encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
+            ensureAtlasTexture()
+            ghostQuads.removeAll(keepingCapacity: true)
+
+            let cursor = cursors[0]
+            var ghostX = cursor.x + cursor.w + 1 // start after cursor beam
+            let ghostY = cursor.y
+
+            for scalar in hint.unicodeScalars {
+                let cp = UInt32(scalar.value)
+                let uv = ensureGlyph(codepoint: cp)
+                if uv.glyphWidth <= 0 { continue }
+
+                let glyphX = ghostX + uv.bearingX
+                let glyphY = ghostY + ascender - uv.bearingY
+
+                appendTextQuad(&ghostQuads,
+                               x: glyphX, y: glyphY,
+                               w: uv.glyphWidth, h: uv.glyphHeight,
+                               uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
+                               r: 0.5, g: 0.5, b: 0.5, a: 0.4)
+                ghostX += cellWidth
+            }
+
+            if let buffer = Self.uploadVertices(ghostQuads, device: device, into: &ghostVertexBuffer),
+               let atlasTexture = glyphAtlasTexture
+            {
+                encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+                encoder.setFragmentTexture(atlasTexture, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: ghostQuads.count)
             }
         }
 
