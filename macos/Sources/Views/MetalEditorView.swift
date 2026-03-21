@@ -101,6 +101,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         inlineHintWorkItem?.cancel()
         dismissCompletion()
         clearMarkedTextState()
+        window?.makeFirstResponder(self)
         needsDisplay = true
     }
 
