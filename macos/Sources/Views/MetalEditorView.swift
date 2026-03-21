@@ -84,8 +84,10 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     deinit {
         cursorBlinkTimer?.invalidate()
+        inlineHintWorkItem?.cancel()
         if let observer = keyWindowObserver {
             NotificationCenter.default.removeObserver(observer)
+            keyWindowObserver = nil
         }
     }
 
@@ -96,7 +98,10 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         editor.markActive()
         updateViewport()
         inlineHint = nil
+        inlineHintWorkItem?.cancel()
         dismissCompletion()
+        clearMarkedTextState()
+        window?.makeFirstResponder(self)
         needsDisplay = true
     }
 

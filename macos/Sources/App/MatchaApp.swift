@@ -156,6 +156,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let tabManager = TabManager.current else { return .terminateNow }
+        let unsavedTabs = tabManager.tabs.filter { $0.isModified }
+        if unsavedTabs.isEmpty { return .terminateNow }
+
+        let alert = NSAlert()
+        alert.messageText = "You have \(unsavedTabs.count) unsaved file\(unsavedTabs.count == 1 ? "" : "s")."
+        alert.informativeText = "Your changes will be lost if you quit without saving."
+        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal()
+        return response == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
             newWindowAction()

@@ -12,6 +12,11 @@ struct EditorView: NSViewRepresentable {
         if nsView.editor !== editor {
             nsView.swapEditor(editor)
         }
+        // Reclaim focus when no other responder has it (e.g., after overlay dismissal)
+        if let window = nsView.window,
+           window.firstResponder === window || window.firstResponder == nil {
+            window.makeFirstResponder(nsView)
+        }
         nsView.setNeedsDisplay(nsView.bounds)
     }
 }
