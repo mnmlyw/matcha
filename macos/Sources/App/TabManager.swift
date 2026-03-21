@@ -4,6 +4,8 @@ import Combine
 import MatchaKit
 
 class TabManager: ObservableObject {
+    static weak var current: TabManager?
+
     let config: MatchaConfig
     private var editorCancellables: [UUID: AnyCancellable] = [:]
 
@@ -45,6 +47,7 @@ class TabManager: ObservableObject {
         let tab = Tab(editor: editor)
         tabs.append(tab)
         observeEditor(editor, id: tab.id)
+        TabManager.current = self
     }
 
     private func observeEditor(_ editor: MatchaEditor, id: UUID) {
