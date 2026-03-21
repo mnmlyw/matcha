@@ -519,6 +519,12 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             case "d":
                 editor.duplicateLine()
                 return
+            case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+                if let n = event.charactersIgnoringModifiers.flatMap({ Int($0) }) {
+                    NotificationCenter.default.post(name: .matchaSwitchToTab, object: nil,
+                                                    userInfo: ["index": n - 1])
+                }
+                return
             default: break
             }
         }

@@ -290,6 +290,12 @@ struct ContentView: View {
                 guard isKeyWindow else { return }
                 saveAsFile()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaSwitchToTab)) { notification in
+                guard isKeyWindow else { return }
+                if let index = notification.userInfo?["index"] as? Int {
+                    tabManager.selectTab(at: index)
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFilePath)) { notification in
                 guard isKeyWindow else { return }
                 if let path = notification.userInfo?["path"] as? String {

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Combine
 import MatchaKit
 
@@ -74,11 +75,37 @@ class TabManager: ObservableObject {
     }
 
     func closeTab(at index: Int) {
+        guard index >= 0 && index < tabs.count else { return }
+        let tab = tabs[index]
+
+        // Prompt to save if modified
+        if tab.isModified {
+            let alert = NSAlert()
+            alert.messageText = "Do you want to save changes to \"\(tab.title)\"?"
+            alert.informativeText = "Your changes will be lost if you don't save them."
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Don't Save")
+            alert.addButton(withTitle: "Cancel")
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                // Save
+                if tab.editor.info.filename != nil {
+                    _ = tab.editor.save()
+                } else {
+                    let panel = NSSavePanel()
+                    guard panel.runModal() == .OK, let url = panel.url else { return }
+                    _ = tab.editor.saveAs(path: url.path)
+                }
+            } else if response == .alertThirdButtonReturn {
+                return // Cancel
+            }
+            // Don't Save falls through
+        }
+
         guard tabs.count > 1 else {
             activeEditor?.newFile()
             return
         }
-        // If closing the active tab, adjust index first
         let wasActive = index == activeIndex
         tabs.remove(at: index)
         if activeIndex > index {
@@ -86,7 +113,6 @@ class TabManager: ObservableObject {
         } else if activeIndex >= tabs.count {
             activeIndex = tabs.count - 1
         }
-        // Always update activeEditor ref after tab removal
         if wasActive || MatchaEditor.activeEditor == nil {
             activeTab?.editor.markActive()
         }
