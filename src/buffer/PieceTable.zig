@@ -23,6 +23,8 @@ pub const PieceTable = struct {
     pieces: PieceList,
     cached_line_count: ?u32 = null,
     cached_total_length: ?u32 = null,
+    /// Cached byte offsets where each line starts. line_starts[i] = byte offset of line i.
+    line_starts: std.ArrayListUnmanaged(u32) = .{},
 
     pub fn init(allocator: Allocator) PieceTable {
         return .{
@@ -56,6 +58,7 @@ pub const PieceTable = struct {
         }
         self.add_buffer.deinit(self.allocator);
         self.pieces.deinit(self.allocator);
+        self.line_starts.deinit(self.allocator);
     }
 
     /// Total length of the document in bytes (cached).
@@ -310,76 +313,55 @@ pub const PieceTable = struct {
     }
 
     fn refreshCaches(self: *PieceTable) void {
-        // Recompute total length
+        // Single pass: compute total length, line count, and line start offsets
+        self.line_starts.clearRetainingCapacity();
+        self.line_starts.append(self.allocator, 0) catch {}; // line 0 starts at byte 0
+
         var len: u32 = 0;
+        var offset: u32 = 0;
         for (self.pieces.items) |p| {
             len += p.length;
+            const slice = self.sourceSlice(p);
+            for (slice) |b| {
+                if (b == '\n') {
+                    self.line_starts.append(self.allocator, offset + 1) catch {};
+                }
+                offset += 1;
+            }
         }
         self.cached_total_length = len;
-
-        // Recompute line count
-        var count: u32 = 1;
-        for (self.pieces.items) |p| {
-            const slice = self.sourceSlice(p);
-            for (slice) |b| {
-                if (b == '\n') count += 1;
-            }
-        }
-        self.cached_line_count = count;
+        self.cached_line_count = @intCast(self.line_starts.items.len);
     }
 
-    /// Get the byte offset of the start of line `line` (0-based line number).
+    /// O(1) — Get the byte offset of the start of line `line` (0-based).
     pub fn lineStart(self: *const PieceTable, line: u32) u32 {
-        if (line == 0) return 0;
-        var current_line: u32 = 0;
-        var offset: u32 = 0;
-        for (self.pieces.items) |p| {
-            const slice = self.sourceSlice(p);
-            for (slice) |b| {
-                if (b == '\n') {
-                    current_line += 1;
-                    if (current_line == line) return offset + 1;
-                }
-                offset += 1;
-            }
-        }
-        return offset;
+        if (line < self.line_starts.items.len) return self.line_starts.items[line];
+        return self.totalLength();
     }
 
-    /// Get the byte offset of the end of line (before newline or at EOF).
+    /// O(1) — Get the byte offset of the end of line (before newline or at EOF).
     pub fn lineEnd(self: *const PieceTable, line: u32) u32 {
-        var current_line: u32 = 0;
-        var offset: u32 = 0;
-        for (self.pieces.items) |p| {
-            const slice = self.sourceSlice(p);
-            for (slice) |b| {
-                if (current_line == line and b == '\n') return offset;
-                if (b == '\n') current_line += 1;
-                offset += 1;
-            }
-        }
-        return offset;
+        if (line + 1 < self.line_starts.items.len) return self.line_starts.items[line + 1] - 1;
+        return self.totalLength();
     }
 
-    /// Get the line number and column for a byte offset.
+    /// O(log n) — Get the line number and column for a byte offset.
     pub fn posToLineCol(self: *const PieceTable, pos: u32) struct { line: u32, col: u32 } {
-        var line: u32 = 0;
-        var col: u32 = 0;
-        var offset: u32 = 0;
-        for (self.pieces.items) |p| {
-            const slice = self.sourceSlice(p);
-            for (slice) |b| {
-                if (offset == pos) return .{ .line = line, .col = col };
-                if (b == '\n') {
-                    line += 1;
-                    col = 0;
-                } else {
-                    col += 1;
-                }
-                offset += 1;
+        const starts = self.line_starts.items;
+        if (starts.len == 0) return .{ .line = 0, .col = pos };
+
+        // Binary search for the largest line_start <= pos
+        var lo: u32 = 0;
+        var hi: u32 = @intCast(starts.len - 1);
+        while (lo < hi) {
+            const mid = lo + (hi - lo + 1) / 2;
+            if (starts[mid] <= pos) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
             }
         }
-        return .{ .line = line, .col = col };
+        return .{ .line = lo, .col = pos - starts[lo] };
     }
 
     /// Get byte offset from line/col (0-based).

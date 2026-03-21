@@ -1622,7 +1622,7 @@ pub const Editor = struct {
         // Pass 2: compute segment_x for byte_col
 
         // Find wrap break points by simulating the render loop
-        var break_positions: [256]u32 = undefined; // byte positions where new segments start
+        var break_positions: [4096]u32 = undefined; // byte positions where new segments start
         var num_breaks: u32 = 0;
 
         if (wrap_width > 0) {
@@ -1634,7 +1634,7 @@ pub const Editor = struct {
             while (scan_pos < line_len) {
                 if (scan_x >= wrap_width and scan_x > 0) {
                     if (scan_has_space) {
-                        if (num_breaks < 256) {
+                        if (num_breaks < 4096) {
                             break_positions[num_breaks] = scan_last_space;
                             num_breaks += 1;
                         }
@@ -1643,7 +1643,7 @@ pub const Editor = struct {
                         scan_has_space = false;
                         continue;
                     } else {
-                        if (num_breaks < 256) {
+                        if (num_breaks < 4096) {
                             break_positions[num_breaks] = scan_pos;
                             num_breaks += 1;
                         }
