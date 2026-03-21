@@ -56,7 +56,6 @@ struct ContentView: View {
                 if let ed = editor {
                     EditorView(editor: ed)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .id(tabManager.activeTab?.id)
                 }
 
                 if showGoToLine {
@@ -289,6 +288,12 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .matchaSaveAsFile)) { _ in
                 guard isKeyWindow else { return }
                 saveAsFile()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .matchaSwitchToTab)) { notification in
+                guard isKeyWindow else { return }
+                if let index = notification.userInfo?["index"] as? Int {
+                    tabManager.selectTab(at: index)
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFilePath)) { notification in
                 guard isKeyWindow else { return }

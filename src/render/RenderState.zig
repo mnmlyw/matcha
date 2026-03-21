@@ -387,6 +387,35 @@ pub const RenderState = struct {
                 seg_x_offset += char_px_w;
             }
 
+            // Indent guides: thin vertical lines at each tab stop within leading whitespace
+            if (config.tab_size > 0 and content_len > 0) {
+                const tab_px = @as(f32, @floatFromInt(config.tab_size)) * cell_w;
+                // Count leading whitespace
+                var indent_bytes: u32 = 0;
+                while (indent_bytes < content_len and
+                    (line_data[indent_bytes] == ' ' or line_data[indent_bytes] == '\t'))
+                {
+                    indent_bytes += 1;
+                }
+                if (indent_bytes > 0 and indent_bytes < content_len) {
+                    var guide_x = tab_px;
+                    const indent_px = @as(f32, @floatFromInt(indent_bytes)) * cell_w;
+                    const guide_y = @as(f32, @floatFromInt(line_base_vrow)) * cell_h - editor.scroll_y;
+                    while (guide_x < indent_px) : (guide_x += tab_px) {
+                        const screen_x = if (wrap_enabled) guide_x + gutter_w else guide_x - editor.scroll_x + gutter_w;
+                        if (screen_x > gutter_w and guide_y + cell_h >= 0 and guide_y <= vp_h) {
+                            self.selections.append(self.allocator, .{
+                                .x = screen_x,
+                                .y = guide_y,
+                                .w = 1,
+                                .h = cell_h,
+                                .color = config.indent_guide_color,
+                            }) catch {};
+                        }
+                    }
+                }
+            }
+
             // Trailing whitespace highlight (skip if entire line is whitespace)
             if (content_len > 0) {
                 var trail_end: u32 = content_len;

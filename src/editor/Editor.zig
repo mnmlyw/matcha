@@ -1808,7 +1808,7 @@ pub const Editor = struct {
         self.rebuildWrapCache(wrap_width);
     }
 
-    /// Rebuild wrap cache by scanning all piece bytes in one pass.
+    /// Rebuild wrap cache by scanning content in a single pass (O(n) not O(n²)).
     fn rebuildWrapCache(self: *Editor, wrap_width: f32) void {
         const line_count = self.buffer.lineCount();
         self.wrap_prefix_sums.clearRetainingCapacity();
@@ -1820,47 +1820,63 @@ pub const Editor = struct {
                 self.wrap_prefix_sums.appendAssumeCapacity(i);
             }
         } else {
+            // Extract full content once to avoid O(n²) lineStart/lineEnd calls
+            const content = self.buffer.getContent(self.allocator) catch {
+                // Fallback: no wrapping
+                var i: u32 = 0;
+                while (i <= line_count) : (i += 1) {
+                    self.wrap_prefix_sums.appendAssumeCapacity(i);
+                }
+                return;
+            };
+            defer self.allocator.free(content);
+
             self.wrap_prefix_sums.appendAssumeCapacity(0);
             var running: u32 = 0;
+            var line_rows: u32 = 1;
+            var seg_x: f32 = 0;
+            var has_space = false;
+            var seg_x_at_space: f32 = 0;
+            var i: usize = 0;
 
-            var line: u32 = 0;
-            while (line < line_count) : (line += 1) {
-                // Count visual rows for this line using word-boundary-aware wrapping
-                const line_start = self.buffer.lineStart(line);
-                const line_end = self.buffer.lineEnd(line);
-                const line_len = line_end - line_start;
-                var line_rows: u32 = 1;
-                var seg_x: f32 = 0;
-                var has_space = false;
-                var last_space_pos: u32 = 0;
-                var pos: u32 = 0;
-
-                while (pos < line_len) {
-                    if (seg_x >= wrap_width and seg_x > 0) {
-                        if (has_space) {
-                            pos = last_space_pos;
-                            seg_x = 0;
-                            has_space = false;
-                        } else {
-                            seg_x = 0;
-                        }
-                        line_rows += 1;
-                    }
-                    const b = self.buffer.byteAt(line_start + pos) orelse break;
-                    if (b == '\n') break;
-                    const cp = self.buffer.codepointAt(line_start + pos);
-                    const cp_len = PieceTable.codepointByteLen(b);
-                    const px_w = self.pixelWidthForCodepoint(cp);
-
-                    if (b == ' ' or b == '\t') {
-                        has_space = true;
-                        last_space_pos = pos + cp_len;
-                    }
-
-                    pos += cp_len;
-                    seg_x += px_w;
+            while (i < content.len) {
+                if (content[i] == '\n') {
+                    running += line_rows;
+                    self.wrap_prefix_sums.append(self.allocator, running) catch return;
+                    line_rows = 1;
+                    seg_x = 0;
+                    has_space = false;
+                    i += 1;
+                    continue;
                 }
 
+                // Check wrap
+                if (seg_x >= wrap_width and seg_x > 0) {
+                    if (has_space) {
+                        seg_x -= seg_x_at_space; // carry over width after space
+                        has_space = false;
+                    } else {
+                        seg_x = 0;
+                    }
+                    line_rows += 1;
+                }
+
+                const b = content[i];
+                const cp_len = PieceTable.codepointByteLen(b);
+                const cp = decodeContentCp(content, i);
+                const px_w = self.pixelWidthForCodepoint(cp);
+
+                if (b == ' ' or b == '\t') {
+                    has_space = true;
+                    seg_x_at_space = seg_x + px_w;
+                }
+
+                i += cp_len;
+                seg_x += px_w;
+            }
+
+            // Last line
+            if (self.wrap_prefix_sums.items.len <= line_count) {
                 running += line_rows;
                 self.wrap_prefix_sums.append(self.allocator, running) catch return;
             }
@@ -2211,6 +2227,23 @@ pub const Editor = struct {
         const lc = self.buffer.posToLineCol(new_pos);
         self.cursor.moveTo(lc.line, lc.col);
         self.ensureCursorVisible();
+    }
+
+    fn decodeContentCp(content: []const u8, pos: usize) u32 {
+        if (pos >= content.len) return 0xFFFD;
+        const b0 = content[pos];
+        if (b0 < 0x80) return b0;
+        if (b0 < 0xC0) return 0xFFFD;
+        if (b0 < 0xE0) {
+            if (pos + 1 >= content.len) return 0xFFFD;
+            return (@as(u32, b0 & 0x1F) << 6) | @as(u32, content[pos + 1] & 0x3F);
+        }
+        if (b0 < 0xF0) {
+            if (pos + 2 >= content.len) return 0xFFFD;
+            return (@as(u32, b0 & 0x0F) << 12) | (@as(u32, content[pos + 1] & 0x3F) << 6) | @as(u32, content[pos + 2] & 0x3F);
+        }
+        if (pos + 3 >= content.len) return 0xFFFD;
+        return (@as(u32, b0 & 0x07) << 18) | (@as(u32, content[pos + 1] & 0x3F) << 12) | (@as(u32, content[pos + 2] & 0x3F) << 6) | @as(u32, content[pos + 3] & 0x3F);
     }
 
     fn isWordByte(ch: u8) bool {

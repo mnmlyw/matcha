@@ -3,7 +3,7 @@ import MetalKit
 import MatchaKit
 
 class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
-    let editor: MatchaEditor
+    private(set) var editor: MatchaEditor
     var renderer: MetalRenderer?
     var cursorBlinkTimer: Timer?
     var cursorVisible = true
@@ -90,6 +90,15 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     override var acceptsFirstResponder: Bool { true }
+
+    func swapEditor(_ newEditor: MatchaEditor) {
+        editor = newEditor
+        editor.markActive()
+        updateViewport()
+        inlineHint = nil
+        dismissCompletion()
+        needsDisplay = true
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -413,20 +422,24 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                                                    "y": rect.origin.y + rect.height])
     }
 
+    private var inlineHintWorkItem: DispatchWorkItem?
+
     private func refreshInlineHint() {
-        if let result = editor.getCompletions(), !result.words.isEmpty {
-            let best = result.words[0]
-            let suffix = String(best.dropFirst(result.prefixLen))
-            if !suffix.isEmpty {
-                inlineHint = suffix
-                inlineHintPrefixLen = result.prefixLen
+        inlineHintWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if let result = self.editor.getCompletions(), !result.words.isEmpty {
+                let best = result.words[0]
+                let suffix = String(best.dropFirst(result.prefixLen))
+                self.inlineHint = suffix.isEmpty ? nil : suffix
+                self.inlineHintPrefixLen = result.prefixLen
             } else {
-                inlineHint = nil
+                self.inlineHint = nil
             }
-        } else {
-            inlineHint = nil
+            self.requestRedraw()
         }
-        requestRedraw()
+        inlineHintWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: workItem)
     }
 
     private func acceptInlineHint() {
@@ -518,6 +531,12 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 return
             case "d":
                 editor.duplicateLine()
+                return
+            case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+                if let n = event.charactersIgnoringModifiers.flatMap({ Int($0) }) {
+                    NotificationCenter.default.post(name: .matchaSwitchToTab, object: nil,
+                                                    userInfo: ["index": n - 1])
+                }
                 return
             default: break
             }

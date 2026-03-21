@@ -200,4 +200,5 @@ extension Notification.Name {
     static let matchaCompletionNavigate = Notification.Name("matchaCompletionNavigate")
     static let matchaCommandPalette = Notification.Name("matchaCommandPalette")
     static let matchaFileFinder = Notification.Name("matchaFileFinder")
+    static let matchaSwitchToTab = Notification.Name("matchaSwitchToTab")
 }

@@ -1,10 +1,11 @@
 import Foundation
+import AppKit
 import Combine
 import MatchaKit
 
 class TabManager: ObservableObject {
     let config: MatchaConfig
-    private var cancellables = Set<AnyCancellable>()
+    private var editorCancellables: [UUID: AnyCancellable] = [:]
 
     struct Tab: Identifiable {
         let id = UUID()
@@ -41,31 +42,34 @@ class TabManager: ObservableObject {
         self.config = cfg
         let editor = MatchaEditor(config: cfg)
         editor.markActive()
-        tabs.append(Tab(editor: editor))
-        observeEditor(editor)
+        let tab = Tab(editor: editor)
+        tabs.append(tab)
+        observeEditor(editor, id: tab.id)
     }
 
-    private func observeEditor(_ editor: MatchaEditor) {
-        editor.objectWillChange.sink { [weak self] _ in
+    private func observeEditor(_ editor: MatchaEditor, id: UUID) {
+        editorCancellables[id] = editor.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
-        }.store(in: &cancellables)
+        }
     }
 
     func newTab() {
         let editor = MatchaEditor(config: config)
-        tabs.append(Tab(editor: editor))
+        let tab = Tab(editor: editor)
+        tabs.append(tab)
         activeIndex = tabs.count - 1
         activeTab?.editor.markActive()
-        observeEditor(editor)
+        observeEditor(editor, id: tab.id)
     }
 
     func openInNewTab(path: String) {
         let editor = MatchaEditor(config: config)
         _ = editor.openFile(path: path)
-        tabs.append(Tab(editor: editor))
+        let tab = Tab(editor: editor)
+        tabs.append(tab)
         activeIndex = tabs.count - 1
         activeTab?.editor.markActive()
-        observeEditor(editor)
+        observeEditor(editor, id: tab.id)
     }
 
     func openInCurrentTab(path: String) {
@@ -74,19 +78,46 @@ class TabManager: ObservableObject {
     }
 
     func closeTab(at index: Int) {
+        guard index >= 0 && index < tabs.count else { return }
+        let tab = tabs[index]
+        let tabId = tab.id
+
+        // Prompt to save if modified
+        if tab.isModified {
+            let alert = NSAlert()
+            alert.messageText = "Do you want to save changes to \"\(tab.title)\"?"
+            alert.informativeText = "Your changes will be lost if you don't save them."
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Don't Save")
+            alert.addButton(withTitle: "Cancel")
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                // Save
+                if tab.editor.info.filename != nil {
+                    _ = tab.editor.save()
+                } else {
+                    let panel = NSSavePanel()
+                    guard panel.runModal() == .OK, let url = panel.url else { return }
+                    _ = tab.editor.saveAs(path: url.path)
+                }
+            } else if response == .alertThirdButtonReturn {
+                return // Cancel
+            }
+            // Don't Save falls through
+        }
+
         guard tabs.count > 1 else {
             activeEditor?.newFile()
             return
         }
-        // If closing the active tab, adjust index first
         let wasActive = index == activeIndex
         tabs.remove(at: index)
+        editorCancellables.removeValue(forKey: tabId) // clean up subscription
         if activeIndex > index {
             activeIndex -= 1
         } else if activeIndex >= tabs.count {
             activeIndex = tabs.count - 1
         }
-        // Always update activeEditor ref after tab removal
         if wasActive || MatchaEditor.activeEditor == nil {
             activeTab?.editor.markActive()
         }
