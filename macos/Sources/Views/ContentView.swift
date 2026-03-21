@@ -56,7 +56,6 @@ struct ContentView: View {
                 if let ed = editor {
                     EditorView(editor: ed)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .id(tabManager.activeTab?.id)
                 }
 
                 if showGoToLine {

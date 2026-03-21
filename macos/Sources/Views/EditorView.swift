@@ -9,6 +9,9 @@ struct EditorView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: MetalEditorView, context: Context) {
+        if nsView.editor !== editor {
+            nsView.swapEditor(editor)
+        }
         nsView.setNeedsDisplay(nsView.bounds)
     }
 }
