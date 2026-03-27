@@ -125,17 +125,26 @@ struct CommandPaletteView: View {
         }
     }
 
+    private func removeMonitor() {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+    }
+
     private func runSelected() {
         guard selectedIndex < filteredCommands.count else { return }
         run(filteredCommands[selectedIndex])
     }
 
     private func run(_ command: PaletteCommandItem) {
+        removeMonitor()
         isVisible = false
         command.action()
     }
 
     private func close() {
+        removeMonitor()
         isVisible = false
     }
 }

@@ -135,6 +135,13 @@ struct FileFinderView: View {
         return qi == query.endIndex
     }
 
+    private func removeMonitor() {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+    }
+
     private func openSelected() {
         let files = filteredFiles
         guard selectedIndex < files.count else { return }
@@ -142,12 +149,14 @@ struct FileFinderView: View {
     }
 
     private func open(_ relativePath: String) {
+        removeMonitor()
         isVisible = false
         let fullPath = (rootPath as NSString).appendingPathComponent(relativePath)
         onOpen(fullPath)
     }
 
     private func close() {
+        removeMonitor()
         isVisible = false
     }
 
