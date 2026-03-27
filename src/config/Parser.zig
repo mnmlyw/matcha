@@ -12,8 +12,12 @@ pub fn parseFile(allocator: Allocator, config: *Config, path: []const u8) !void 
     const content = try file.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(content);
 
+    // First pass: find appearance setting
     try parse(allocator, config, content);
+    // Apply theme colors for the chosen appearance
     config.applyAppearance();
+    // Second pass: re-apply user color overrides on top of theme
+    try parse(allocator, config, content);
 }
 
 pub fn parse(allocator: Allocator, config: *Config, content: []const u8) !void {

@@ -9,7 +9,9 @@ const Config = @import("../config/Config.zig").Config;
 const Cell = @import("../render/Cell.zig");
 const RenderState = @import("../render/RenderState.zig").RenderState;
 const Language = @import("../highlight/Language.zig").Language;
-const charWidth = @import("../buffer/UnicodeIterator.zig").charWidth;
+const UnicodeUtil = @import("../buffer/UnicodeIterator.zig");
+const charWidth = UnicodeUtil.charWidth;
+const nextClusterLen = UnicodeUtil.nextClusterLen;
 
 pub const Editor = struct {
     pub const FindOptions = struct {
@@ -40,6 +42,10 @@ pub const Editor = struct {
     filename_owned: bool = false,
     filename_z: ?[:0]u8 = null, // cached null-terminated copy for C API
     modified: bool = false,
+    // Version-based dirty tracking: stable across undo/redo/branched history
+    current_version: i64 = 0,
+    save_version: i64 = 0,
+    save_reachable: bool = true, // false when new edit invalidates the saved redo path
     edit_counter: u32 = 0,
 
     // Render-computed max visible line length (set by RenderState.compute)
@@ -88,6 +94,26 @@ pub const Editor = struct {
 
     // ── Error feedback ────────────────────────────────────────
 
+    /// Call after undo_stack.commit() to track version and modified state.
+    /// `branched` is true when commit cleared the redo stack (new edit after undo).
+    fn markDirty(self: *Editor, branched: bool) void {
+        self.current_version += 1;
+        if (branched and self.save_reachable) {
+            // Only unreachable if the saved state was ahead of the branch point
+            // (i.e., it was in the redo path that was just destroyed).
+            // Branch point = current_version - 1 (the version before this edit).
+            if (self.save_version > self.current_version - 1) {
+                self.save_reachable = false;
+            }
+        }
+        self.modified = !self.save_reachable or self.current_version != self.save_version;
+    }
+
+    /// Invalidate render/wrap caches after any buffer mutation (no version tracking).
+    fn invalidateCaches(self: *Editor) void {
+        self.edit_counter +%= 1;
+    }
+
     pub fn setLastError(self: *Editor, err: anyerror) void {
         const name = @errorName(err);
         const len = @min(name.len, 63);
@@ -110,6 +136,8 @@ pub const Editor = struct {
         self.undo_stack.deinit();
         self.undo_stack = UndoStack.init(self.allocator);
         self.modified = false;
+        self.save_version = self.current_version;
+        self.save_reachable = true;
         self.scroll_x = 0;
         self.scroll_y = 0;
         self.language = .none;
@@ -148,6 +176,8 @@ pub const Editor = struct {
         self.undo_stack.deinit();
         self.undo_stack = UndoStack.init(self.allocator);
         self.modified = false;
+        self.save_version = self.current_version;
+        self.save_reachable = true;
         self.scroll_x = 0;
         self.scroll_y = 0;
         self.max_visible_line_len = 0;
@@ -188,6 +218,8 @@ pub const Editor = struct {
             self.filename_z = self.allocator.dupeZ(u8, path) catch null;
         }
         self.modified = false;
+        self.save_version = self.current_version;
+        self.save_reachable = true;
     }
 
     // ── Editing ────────────────────────────────────────────────
@@ -249,19 +281,19 @@ pub const Editor = struct {
     fn insertTextWithOptions(self: *Editor, text: []const u8, allow_auto_pair: bool) !void {
         if (allow_auto_pair and try self.handleAutoPair(text)) return;
 
-        // If there's a selection, delete it first
+        // If there's a selection, delete it first (as part of the same undo group)
         if (self.selection.active) {
-            try self.deleteSelection();
+            try self.deleteSelectionNoCommit();
         }
 
         const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
 
-        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        if (self.undo_stack.currentGroupEmpty())
+            self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
         try self.undo_stack.record(.insert, pos, text);
 
         try self.buffer.insert(pos, text);
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
 
         // Advance cursor
         for (text) |ch| {
@@ -274,7 +306,8 @@ pub const Editor = struct {
         }
         self.cursor.target_col = self.cursor.col;
 
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
         self.ensureCursorVisible();
     }
 
@@ -301,15 +334,15 @@ pub const Editor = struct {
         try self.undo_stack.record(.delete, prev_pos, del_bytes);
 
         try self.buffer.delete(prev_pos, del_len);
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
 
         // Move cursor to deletion point
         const lc = self.buffer.posToLineCol(prev_pos);
         self.cursor.moveTo(lc.line, lc.col);
         self.cursor.target_col = self.cursor.col;
 
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
         self.ensureCursorVisible();
     }
 
@@ -333,10 +366,10 @@ pub const Editor = struct {
         try self.undo_stack.record(.delete, pos, del_bytes);
 
         try self.buffer.delete(pos, del_len);
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
 
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
     }
 
     pub fn deleteWordBackward(self: *Editor) !void {
@@ -355,12 +388,12 @@ pub const Editor = struct {
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
         try self.undo_stack.record(.delete, start_pos, deleted);
         try self.buffer.delete(start_pos, pos - start_pos);
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
 
         const lc = self.buffer.posToLineCol(start_pos);
         self.cursor.moveTo(lc.line, lc.col);
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
         self.ensureCursorVisible();
     }
 
@@ -380,10 +413,10 @@ pub const Editor = struct {
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
         try self.undo_stack.record(.delete, pos, deleted);
         try self.buffer.delete(pos, end_pos - pos);
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
 
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
         self.ensureCursorVisible();
     }
 
@@ -414,6 +447,46 @@ pub const Editor = struct {
         }
     }
 
+    fn insertNoCommit(self: *Editor, text: []const u8) !void {
+        const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        try self.undo_stack.record(.insert, pos, text);
+        try self.buffer.insert(pos, text);
+        for (text) |ch| {
+            if (ch == '\n') {
+                self.cursor.line += 1;
+                self.cursor.col = 0;
+            } else {
+                self.cursor.col += 1;
+            }
+        }
+        self.cursor.target_col = self.cursor.col;
+    }
+
+    fn deleteSelectionNoCommit(self: *Editor) !void {
+        if (!self.selection.active) return;
+
+        const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+        const start_pos = self.buffer.lineColToPos(range.start_line, range.start_col);
+        const end_pos = self.buffer.lineColToPos(range.end_line, range.end_col);
+
+        if (end_pos <= start_pos) {
+            self.selection.clear();
+            return;
+        }
+
+        const deleted = try self.buffer.getRange(self.allocator, start_pos, end_pos);
+        defer self.allocator.free(deleted);
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        try self.undo_stack.record(.delete, start_pos, deleted);
+
+        try self.buffer.delete(start_pos, end_pos - start_pos);
+        self.invalidateCaches();
+
+        self.cursor.moveTo(range.start_line, range.start_col);
+        self.selection.clear();
+    }
+
     fn deleteSelection(self: *Editor) !void {
         if (!self.selection.active) return;
 
@@ -433,13 +506,13 @@ pub const Editor = struct {
         try self.undo_stack.record(.delete, start_pos, deleted);
 
         try self.buffer.delete(start_pos, end_pos - start_pos);
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
 
         self.cursor.moveTo(range.start_line, range.start_col);
         self.selection.clear();
 
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
         self.ensureCursorVisible();
     }
 
@@ -447,7 +520,8 @@ pub const Editor = struct {
 
     pub fn insertTab(self: *Editor) !void {
         if (self.selection.active) {
-            const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+            const line_range = self.selectedLineRange();
+            const range = .{ .start_line = line_range.start_line, .end_line = line_range.end_line };
             var spaces: [16]u8 = [_]u8{' '} ** 16;
             const space_count: u32 = @min(self.config.tab_size, 16);
             const indent_text = if (self.config.insert_spaces) spaces[0..space_count] else "\t";
@@ -473,12 +547,17 @@ pub const Editor = struct {
                 applied_lines += 1;
             }
 
-            try self.undo_stack.commit();
-            self.modified = true;
-            self.edit_counter +%= 1;
-            self.cursor.col += indent_width;
-            self.cursor.target_col = self.cursor.col;
-            self.selection.anchor_col += indent_width;
+            const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
+            self.invalidateCaches();
+            // Only adjust col if the cursor/anchor line was actually indented
+            if (self.cursor.line >= range.start_line and self.cursor.line <= range.end_line) {
+                self.cursor.col += indent_width;
+                self.cursor.target_col = self.cursor.col;
+            }
+            if (self.selection.anchor_line >= range.start_line and self.selection.anchor_line <= range.end_line) {
+                self.selection.anchor_col += indent_width;
+            }
             self.ensureCursorVisible();
         } else {
             var spaces: [16]u8 = [_]u8{' '} ** 16;
@@ -497,13 +576,9 @@ pub const Editor = struct {
             removed: []u8,
         };
 
-        var start_line = self.cursor.line;
-        var end_line = self.cursor.line;
-        if (self.selection.active) {
-            const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
-            start_line = range.start_line;
-            end_line = range.end_line;
-        }
+        const line_range = self.selectedLineRange();
+        const start_line = line_range.start_line;
+        const end_line = line_range.end_line;
 
         const tab = self.config.tab_size;
         const max_changes = end_line - start_line + 1;
@@ -567,9 +642,9 @@ pub const Editor = struct {
         }
 
         if (change_count > 0) {
-            try self.undo_stack.commit();
-            self.modified = true;
-            self.edit_counter +%= 1;
+            const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
+            self.invalidateCaches();
         }
         self.cursor.target_col = self.cursor.col;
         self.ensureCursorVisible();
@@ -659,9 +734,9 @@ pub const Editor = struct {
             li -= 1;
         }
 
-        try self.undo_stack.commit();
-        self.modified = true;
-        self.edit_counter +%= 1;
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
+        self.invalidateCaches();
 
         // Adjust cursor and anchor columns
         if (cursor_col_delta < 0) {
@@ -715,10 +790,10 @@ pub const Editor = struct {
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
         try self.undo_stack.record(.insert, insert_pos, insert_text);
         try self.buffer.insert(insert_pos, insert_text);
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
 
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
 
         const line_delta = end_line - line_range.start_line + 1;
         self.cursor.moveTo(self.cursor.line + line_delta, self.cursor.col);
@@ -762,10 +837,10 @@ pub const Editor = struct {
 
         try self.undo_stack.record(.insert, insert_pos, insert_text);
         try self.buffer.insert(insert_pos, insert_text);
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
 
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
         self.cursor.moveTo(self.cursor.line - 1, self.cursor.col);
         if (self.selection.active) {
             self.selection.anchor_line -= 1;
@@ -807,10 +882,10 @@ pub const Editor = struct {
 
         try self.undo_stack.record(.insert, insert_pos, insert_text);
         try self.buffer.insert(insert_pos, insert_text);
-        try self.undo_stack.commit();
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
 
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
         self.cursor.moveTo(self.cursor.line + 1, self.cursor.col);
         if (self.selection.active) {
             self.selection.anchor_line += 1;
@@ -1091,8 +1166,9 @@ pub const Editor = struct {
 
         self.cursor.moveTo(group.cursor_line, group.cursor_col);
         self.selection.clear();
-        self.modified = true;
         self.edit_counter +%= 1;
+        self.current_version -= 1;
+        self.modified = !self.save_reachable or self.current_version != self.save_version;
 
         try self.undo_stack.pushRedo(group);
         self.ensureCursorVisible();
@@ -1121,10 +1197,11 @@ pub const Editor = struct {
         }
 
         self.selection.clear();
-        self.modified = true;
         self.edit_counter +%= 1;
+        self.current_version += 1;
 
         try self.undo_stack.pushUndo(group);
+        self.modified = !self.save_reachable or self.current_version != self.save_version;
         self.ensureCursorVisible();
     }
 
@@ -1502,7 +1579,7 @@ pub const Editor = struct {
                 if (bytesEqual(text, query, options.case_sensitive) and
                     (!options.whole_word or self.isWholeWordMatch(start_pos, end_pos)))
                 {
-                    try self.deleteSelection();
+                    try self.deleteSelectionNoCommit();
                     try self.insertTextLiteral(replacement);
                     _ = self.findNextWithOptions(query, options);
                     return true;
@@ -1522,6 +1599,7 @@ pub const Editor = struct {
 
         self.cursor.moveTo(0, 0);
         self.selection.clear();
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
 
         var search_pos: u32 = 0;
         while (search_pos + @as(u32, @intCast(query.len)) <= self.buffer.totalLength()) {
@@ -1530,13 +1608,19 @@ pub const Editor = struct {
                 const end_lc = self.buffer.posToLineCol(search_pos + @as(u32, @intCast(query.len)));
                 self.selection.setAnchor(start_lc.line, start_lc.col);
                 self.cursor.moveTo(end_lc.line, end_lc.col);
-                try self.deleteSelection();
-                try self.insertTextLiteral(replacement);
+                try self.deleteSelectionNoCommit();
+                try self.insertNoCommit(replacement);
                 search_pos += @as(u32, @intCast(replacement.len));
                 count += 1;
             } else {
                 search_pos += 1;
             }
+        }
+
+        if (count > 0) {
+            const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
+            self.invalidateCaches();
         }
         return count;
     }
@@ -1617,12 +1701,12 @@ pub const Editor = struct {
         const line_len = line_end - line_start;
         const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
 
-        // Two-pass approach for word-boundary wrapping:
-        // Pass 1: find all wrap break points for this line (up to byte_col)
-        // Pass 2: compute segment_x for byte_col
+        const data = self.buffer.getRange(self.allocator, line_start, line_end) catch
+            return .{ .segment = 0, .segment_x = 0, .total_x = 0 };
+        defer self.allocator.free(data);
 
-        // Find wrap break points by simulating the render loop
-        var break_positions: [4096]u32 = undefined; // byte positions where new segments start
+        // Pass 1: find wrap break points (cluster-aware)
+        var break_positions: [4096]u32 = undefined;
         var num_breaks: u32 = 0;
 
         if (wrap_width > 0) {
@@ -1634,66 +1718,60 @@ pub const Editor = struct {
             while (scan_pos < line_len) {
                 if (scan_x >= wrap_width and scan_x > 0) {
                     if (scan_has_space) {
-                        if (num_breaks < 4096) {
-                            break_positions[num_breaks] = scan_last_space;
-                            num_breaks += 1;
-                        }
+                        if (num_breaks < 4096) { break_positions[num_breaks] = scan_last_space; num_breaks += 1; }
                         scan_pos = scan_last_space;
                         scan_x = 0;
                         scan_has_space = false;
                         continue;
                     } else {
-                        if (num_breaks < 4096) {
-                            break_positions[num_breaks] = scan_pos;
-                            num_breaks += 1;
-                        }
+                        if (num_breaks < 4096) { break_positions[num_breaks] = scan_pos; num_breaks += 1; }
                         scan_x = 0;
                         scan_has_space = false;
                     }
                 }
-                const b = self.buffer.byteAt(line_start + scan_pos) orelse break;
-                if (b == '\n') break;
-                const cp = self.buffer.codepointAt(line_start + scan_pos);
-                const cp_len = PieceTable.codepointByteLen(b);
-                const px_w = self.pixelWidthForCodepoint(cp);
+                if (data[scan_pos] == '\n') break;
+                const cluster_len = nextClusterLen(data, scan_pos);
+                if (cluster_len == 0) break;
+                const cp = decodeContentCp(data, scan_pos);
+                const px_w = if (cluster_len > PieceTable.codepointByteLen(data[scan_pos]))
+                    self.pixelWidthForCodepoint(cp) // multi-codepoint cluster
+                else
+                    self.pixelWidthForCodepoint(cp);
 
-                if (b == ' ' or b == '\t') {
+                if (data[scan_pos] == ' ' or data[scan_pos] == '\t') {
                     scan_has_space = true;
-                    scan_last_space = scan_pos + cp_len;
+                    scan_last_space = scan_pos + cluster_len;
                 }
 
-                scan_pos += cp_len;
+                scan_pos += cluster_len;
                 scan_x += px_w;
             }
         }
 
-        // Now compute segment and segment_x for byte_col
+        // Determine which segment byte_col falls in
         var segment: u32 = 0;
-        var seg_start: u32 = 0; // byte offset where current segment starts
+        var seg_start: u32 = 0;
         while (segment < num_breaks and break_positions[segment] <= byte_col) {
             seg_start = break_positions[segment];
             segment += 1;
         }
 
-        // Measure pixel width from seg_start to byte_col
+        // Pass 2: measure pixel width (cluster-aware)
         var segment_x: f32 = 0;
         var total_x: f32 = 0;
         var pos: u32 = 0;
         while (pos < byte_col and pos < line_len) {
-            const b = self.buffer.byteAt(line_start + pos) orelse break;
-            if (b == '\n') break;
-            const cp = self.buffer.codepointAt(line_start + pos);
+            if (data[pos] == '\n') break;
+            const cluster_len = nextClusterLen(data, pos);
+            if (cluster_len == 0) break;
+            const cp = decodeContentCp(data, pos);
             const px_w = self.pixelWidthForCodepoint(cp);
             total_x += px_w;
             if (pos >= seg_start) segment_x += px_w;
-            pos += PieceTable.codepointByteLen(b);
+            pos += cluster_len;
         }
 
-        return .{
-            .segment = segment,
-            .segment_x = segment_x,
-            .total_x = total_x,
-        };
+        return .{ .segment = segment, .segment_x = segment_x, .total_x = total_x };
     }
 
     pub fn pixelXToByteCol(self: *const Editor, line: u32, pixel_x: f32, target_segment: ?u32) u32 {
@@ -1703,53 +1781,50 @@ pub const Editor = struct {
         const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
         const target_x = @max(0, pixel_x);
 
+        const data = self.buffer.getRange(self.allocator, line_start, line_end) catch return 0;
+        defer self.allocator.free(data);
+
         var pos: u32 = 0;
         var segment: u32 = 0;
         var segment_x: f32 = 0;
-        // Word-boundary wrap tracking
         var has_space = false;
         var last_space_pos: u32 = 0;
 
         while (pos < line_len) {
             if (wrap_width > 0 and segment_x >= wrap_width and segment_x > 0) {
                 if (has_space) {
-                    // If we're past the target segment already, return last position
-                    if (target_segment) |target| {
-                        if (segment == target) return last_space_pos;
-                    }
+                    if (target_segment) |target| { if (segment == target) return last_space_pos; }
                     pos = last_space_pos;
                     segment_x = 0;
                     has_space = false;
                 } else {
-                    if (target_segment) |target| {
-                        if (segment == target) return pos;
-                    }
+                    if (target_segment) |target| { if (segment == target) return pos; }
                     segment_x = 0;
                 }
                 segment += 1;
             }
-            const b = self.buffer.byteAt(line_start + pos) orelse break;
-            if (b == '\n') break;
-            const cp = self.buffer.codepointAt(line_start + pos);
-            const cw = charWidth(cp);
-            const cp_len = PieceTable.codepointByteLen(b);
+            if (data[pos] == '\n') break;
+            const cluster_len = nextClusterLen(data, pos);
+            if (cluster_len == 0) break;
+            const cp = decodeContentCp(data, pos);
+            const is_cluster = cluster_len > PieceTable.codepointByteLen(data[pos]);
             const char_px_w = self.pixelWidthForCodepoint(cp);
 
-            if (b == ' ' or b == '\t') {
+            if (data[pos] == ' ' or data[pos] == '\t') {
                 has_space = true;
-                last_space_pos = pos + cp_len;
+                last_space_pos = pos + cluster_len;
             }
 
             if (target_segment == null or segment == target_segment.?) {
                 if (target_x < segment_x + char_px_w) {
-                    if (cw > 1 and target_x >= segment_x + char_px_w / 2.0) {
-                        return pos + cp_len;
+                    if ((is_cluster or charWidth(cp) > 1) and target_x >= segment_x + char_px_w / 2.0) {
+                        return pos + cluster_len;
                     }
                     return pos;
                 }
             }
 
-            pos += cp_len;
+            pos += cluster_len;
             segment_x += char_px_w;
         }
 
@@ -1758,34 +1833,46 @@ pub const Editor = struct {
 
     // ── UTF-8 column helpers ─────────────────────────────────
 
-    /// Convert byte column to visual column (accounts for double-width CJK chars).
+    /// Convert byte column to visual column (cluster-aware).
     pub fn byteColToVisualCol(self: *const Editor, line: u32, byte_col: u32) u32 {
         const line_start = self.buffer.lineStart(line);
+        const line_end = self.buffer.lineEnd(line);
+        const line_len = line_end - line_start;
+        const data = self.buffer.getRange(self.allocator, line_start, line_end) catch return 0;
+        defer self.allocator.free(data);
+
         var pos: u32 = 0;
         var vcol: u32 = 0;
-        while (pos < byte_col) {
-            const b = self.buffer.byteAt(line_start + pos) orelse break;
-            if (b == '\n') break;
-            const cp = self.buffer.codepointAt(line_start + pos);
-            pos += PieceTable.codepointByteLen(b);
-            vcol += charWidth(cp);
+        while (pos < byte_col and pos < line_len) {
+            if (data[pos] == '\n') break;
+            const cluster_len = nextClusterLen(data, pos);
+            if (cluster_len == 0) break;
+            const cp = decodeContentCp(data, pos);
+            const cw: u32 = if (cluster_len > PieceTable.codepointByteLen(data[pos])) 2 else charWidth(cp);
+            pos += cluster_len;
+            vcol += cw;
         }
         return vcol;
     }
 
-    /// Convert visual column to byte column (accounts for double-width CJK chars).
+    /// Convert visual column to byte column (cluster-aware).
     pub fn visualColToByteCol(self: *const Editor, line: u32, vcol: u32) u32 {
         const line_start = self.buffer.lineStart(line);
         const line_end = self.buffer.lineEnd(line);
         const line_len = line_end - line_start;
+        const data = self.buffer.getRange(self.allocator, line_start, line_end) catch return 0;
+        defer self.allocator.free(data);
+
         var pos: u32 = 0;
         var v: u32 = 0;
         while (pos < line_len and v < vcol) {
-            const b = self.buffer.byteAt(line_start + pos) orelse break;
-            if (b == '\n') break;
-            const cp = self.buffer.codepointAt(line_start + pos);
-            pos += PieceTable.codepointByteLen(b);
-            v += charWidth(cp);
+            if (data[pos] == '\n') break;
+            const cluster_len = nextClusterLen(data, pos);
+            if (cluster_len == 0) break;
+            const cp = decodeContentCp(data, pos);
+            const cw: u32 = if (cluster_len > PieceTable.codepointByteLen(data[pos])) 2 else charWidth(cp);
+            pos += cluster_len;
+            v += cw;
         }
         return pos;
     }
@@ -1861,17 +1948,17 @@ pub const Editor = struct {
                     line_rows += 1;
                 }
 
-                const b = content[i];
-                const cp_len = PieceTable.codepointByteLen(b);
+                const cluster_len = nextClusterLen(content, @intCast(i));
+                if (cluster_len == 0) break;
                 const cp = decodeContentCp(content, i);
                 const px_w = self.pixelWidthForCodepoint(cp);
 
-                if (b == ' ' or b == '\t') {
+                if (content[i] == ' ' or content[i] == '\t') {
                     has_space = true;
                     seg_x_at_space = seg_x + px_w;
                 }
 
-                i += cp_len;
+                i += cluster_len;
                 seg_x += px_w;
             }
 
@@ -2004,7 +2091,8 @@ pub const Editor = struct {
             try self.buffer.delete(start_pos, end_pos - start_pos);
             try self.undo_stack.record(.insert, start_pos, wrapped);
             try self.buffer.insert(start_pos, wrapped);
-            try self.undo_stack.commit();
+            const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
 
             const end_lc = self.buffer.posToLineCol(start_pos + @as(u32, @intCast(wrapped.len)));
             self.selection.clear();
@@ -2013,14 +2101,14 @@ pub const Editor = struct {
             var pair = [2]u8{ ch, closing };
             try self.undo_stack.record(.insert, cursor_pos, &pair);
             try self.buffer.insert(cursor_pos, &pair);
-            try self.undo_stack.commit();
+            const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
 
             const lc = self.buffer.posToLineCol(cursor_pos + 1);
             self.cursor.moveTo(lc.line, lc.col);
         }
 
-        self.modified = true;
-        self.edit_counter +%= 1;
+        self.invalidateCaches();
         self.ensureCursorVisible();
         return true;
     }
