@@ -95,13 +95,13 @@ class TabManager: ObservableObject {
             alert.addButton(withTitle: "Cancel")
             let response = alert.runModal()
             if response == .alertFirstButtonReturn {
-                // Save
+                // Save — abort close if save fails
                 if tab.editor.info.filename != nil {
-                    _ = tab.editor.save()
+                    if !tab.editor.save() { return }
                 } else {
                     let panel = NSSavePanel()
                     guard panel.runModal() == .OK, let url = panel.url else { return }
-                    _ = tab.editor.saveAs(path: url.path)
+                    if !tab.editor.saveAs(path: url.path) { return }
                 }
             } else if response == .alertThirdButtonReturn {
                 return // Cancel

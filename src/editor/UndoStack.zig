@@ -81,6 +81,18 @@ pub const UndoStack = struct {
         }
     }
 
+    pub fn undoDepth(self: *const UndoStack) usize {
+        return self.undo_stack.items.len;
+    }
+
+    pub fn redoDepth(self: *const UndoStack) usize {
+        return self.redo_stack.items.len;
+    }
+
+    pub fn currentGroupEmpty(self: *const UndoStack) bool {
+        return self.current_ops.items.len == 0;
+    }
+
     /// Drop the current in-progress edit group.
     pub fn discardCurrentGroup(self: *UndoStack) void {
         for (self.current_ops.items) |op| {
@@ -90,8 +102,9 @@ pub const UndoStack = struct {
     }
 
     /// Commit the current group of operations to the undo stack.
-    pub fn commit(self: *UndoStack) !void {
-        if (self.current_ops.items.len == 0) return;
+    /// Returns true if redo stack was cleared (branched history).
+    pub fn commit(self: *UndoStack) !bool {
+        if (self.current_ops.items.len == 0) return false;
 
         const ops = try self.allocator.dupe(EditOp, self.current_ops.items);
         try self.undo_stack.append(self.allocator, .{
@@ -102,10 +115,12 @@ pub const UndoStack = struct {
         self.current_ops.clearRetainingCapacity();
 
         // Clear redo stack on new edit
+        const had_redo = self.redo_stack.items.len > 0;
         for (self.redo_stack.items) |group| {
             self.freeGroup(group);
         }
         self.redo_stack.clearRetainingCapacity();
+        return had_redo;
     }
 
     /// Pop the last undo group. Caller applies the inverse operations.
