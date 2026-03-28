@@ -99,7 +99,11 @@ struct FileFinderView: View {
         .shadow(color: Color.black.opacity(0.25), radius: 16, y: 8)
         .onAppear {
             queryFocused = true
-            allFiles = scanFiles(root: rootPath)
+            // Scan files off the main thread to avoid UI freeze on large directories
+            DispatchQueue.global(qos: .userInitiated).async {
+                let files = scanFiles(root: rootPath)
+                DispatchQueue.main.async { allFiles = files }
+            }
             eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 let count = filteredFiles.count
                 switch Int(event.keyCode) {

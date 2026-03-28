@@ -144,13 +144,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openFilePath(_ path: String) {
-        // Delay slightly to ensure the window and editor are ready
+        // Always queue — ContentView will consume on appear or via notification
         DispatchQueue.main.async {
-            if MatchaEditor.activeEditor != nil {
+            if MatchaEditor.activeEditor != nil && NSApp.keyWindow != nil {
                 NotificationCenter.default.post(name: .matchaOpenFilePath,
                                                 object: nil,
                                                 userInfo: ["path": path])
             } else {
+                // No key window yet — queue for ContentView.onAppear
                 AppDelegate.pendingFilePaths.append(path)
             }
         }

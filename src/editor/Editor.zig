@@ -219,6 +219,7 @@ pub const Editor = struct {
             self.filename_owned = true;
             if (self.filename_z) |z| self.allocator.free(z);
             self.filename_z = self.allocator.dupeZ(u8, path) catch null;
+            self.language = Language.detectFromFilename(path);
         }
         self.modified = false;
         self.save_version = self.current_version;
@@ -1625,14 +1626,17 @@ pub const Editor = struct {
     pub fn replaceAllWithOptions(self: *Editor, query: []const u8, replacement: []const u8, options: FindOptions) !u32 {
         if (query.len == 0) return 0;
         var count: u32 = 0;
-
-        self.cursor.moveTo(0, 0);
-        self.selection.clear();
-        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        var initialized = false;
 
         var search_pos: u32 = 0;
         while (search_pos + @as(u32, @intCast(query.len)) <= self.buffer.totalLength()) {
             if (self.matchAt(search_pos, query, options)) {
+                if (!initialized) {
+                    self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+                    self.cursor.moveTo(0, 0);
+                    self.selection.clear();
+                    initialized = true;
+                }
                 const start_lc = self.buffer.posToLineCol(search_pos);
                 const end_lc = self.buffer.posToLineCol(search_pos + @as(u32, @intCast(query.len)));
                 self.selection.setAnchor(start_lc.line, start_lc.col);
