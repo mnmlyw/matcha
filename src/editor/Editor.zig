@@ -336,19 +336,30 @@ pub const Editor = struct {
             prev_pos = pos - 1;
             del_len = 1;
         } else {
-            // Within a line: find previous cluster boundary
-            const line_data = self.buffer.getRange(self.allocator, line_start, pos) catch return;
-            defer self.allocator.free(line_data);
-            var scan: u32 = 0;
-            var last_start: u32 = 0;
-            while (scan < line_data.len) {
-                last_start = scan;
-                const cl = nextClusterLen(line_data, scan);
-                if (cl == 0) break;
-                scan += cl;
+            // Check if previous byte is ASCII (fast path: no cluster scan needed)
+            const prev_byte = self.buffer.byteAt(pos - 1) orelse 0;
+            if (prev_byte < 0x80) {
+                // ASCII fast path
+                prev_pos = pos - 1;
+                del_len = 1;
+            } else if (self.buffer.getRange(self.allocator, line_start, pos)) |line_data| {
+                // Non-ASCII: scan for cluster boundary
+                defer self.allocator.free(line_data);
+                var scan: u32 = 0;
+                var last_start: u32 = 0;
+                while (scan < line_data.len) {
+                    last_start = scan;
+                    const cl = nextClusterLen(line_data, scan);
+                    if (cl == 0) break;
+                    scan += cl;
+                }
+                prev_pos = line_start + last_start;
+                del_len = pos - prev_pos;
+            } else |_| {
+                // Alloc failed: fall back to codepoint
+                prev_pos = self.buffer.prevCodepointStart(pos);
+                del_len = pos - prev_pos;
             }
-            prev_pos = line_start + last_start;
-            del_len = pos - prev_pos;
         }
 
         // Get the bytes we're deleting for undo
@@ -381,13 +392,20 @@ pub const Editor = struct {
         if (pos >= self.buffer.totalLength()) return;
 
         // Find end of grapheme cluster at current position
-        const line_start = self.buffer.lineStart(self.cursor.line);
-        const line_end = self.buffer.lineEnd(self.cursor.line);
-        const data = try self.buffer.getRange(self.allocator, line_start, line_end);
-        defer self.allocator.free(data);
-        const col = pos - line_start;
-        const cl = nextClusterLen(data, col);
-        const del_len = if (cl > 0) cl else self.buffer.nextCodepointStart(pos) - pos;
+        const byte = self.buffer.byteAt(pos) orelse return;
+        const del_len: u32 = if (byte < 0x80)
+            1 // ASCII fast path
+        else blk: {
+            const line_start = self.buffer.lineStart(self.cursor.line);
+            const line_end = self.buffer.lineEnd(self.cursor.line);
+            const data = self.buffer.getRange(self.allocator, line_start, line_end) catch {
+                break :blk self.buffer.nextCodepointStart(pos) - pos;
+            };
+            defer self.allocator.free(data);
+            const col = pos - line_start;
+            const cl = nextClusterLen(data, col);
+            break :blk if (cl > 0) cl else self.buffer.nextCodepointStart(pos) - pos;
+        };
 
         const del_bytes = try self.buffer.getRange(self.allocator, pos, pos + del_len);
         defer self.allocator.free(del_bytes);
@@ -2336,25 +2354,36 @@ pub const Editor = struct {
     fn moveCursorLeft(self: *Editor) void {
         if (self.cursor.col > 0) {
             const line_start = self.buffer.lineStart(self.cursor.line);
-            // Walk clusters from line start to find the one before cursor
-            const data = self.buffer.getRange(self.allocator, line_start, line_start + self.cursor.col) catch {
-                // Fallback to codepoint-based movement
-                const abs_pos = line_start + self.cursor.col;
-                const prev_pos = self.buffer.prevCodepointStart(abs_pos);
-                self.cursor.moveTo(self.cursor.line, if (prev_pos >= line_start) prev_pos - line_start else 0);
-                self.ensureCursorVisible();
-                return;
-            };
-            defer self.allocator.free(data);
-            var scan: u32 = 0;
-            var last_start: u32 = 0;
-            while (scan < data.len) {
-                last_start = scan;
-                const cl = nextClusterLen(data, scan);
-                if (cl == 0) break;
-                scan += cl;
+            const abs_pos = line_start + self.cursor.col;
+            const prev_pos = self.buffer.prevCodepointStart(abs_pos);
+            const new_col = if (prev_pos >= line_start) prev_pos - line_start else 0;
+
+            // Check if prev codepoint could be part of a multi-codepoint cluster
+            // (combining mark, regional indicator, etc.) — if so, scan for cluster start
+            if (new_col > 0) {
+                const prev_byte = self.buffer.byteAt(prev_pos) orelse 0;
+                if (prev_byte >= 0x80) {
+                    // Non-ASCII: might be in a cluster, do full scan
+                    const data = self.buffer.getRange(self.allocator, line_start, abs_pos) catch {
+                        self.cursor.moveTo(self.cursor.line, new_col);
+                        self.ensureCursorVisible();
+                        return;
+                    };
+                    defer self.allocator.free(data);
+                    var scan: u32 = 0;
+                    var last_start: u32 = 0;
+                    while (scan < data.len) {
+                        last_start = scan;
+                        const cl = nextClusterLen(data, scan);
+                        if (cl == 0) break;
+                        scan += cl;
+                    }
+                    self.cursor.moveTo(self.cursor.line, last_start);
+                    self.ensureCursorVisible();
+                    return;
+                }
             }
-            self.cursor.moveTo(self.cursor.line, last_start);
+            self.cursor.moveTo(self.cursor.line, new_col);
         } else if (self.cursor.line > 0) {
             self.cursor.line -= 1;
             const line_len = self.buffer.lineEnd(self.cursor.line) - self.buffer.lineStart(self.cursor.line);
@@ -2368,18 +2397,24 @@ pub const Editor = struct {
         const line_end = self.buffer.lineEnd(self.cursor.line);
         const line_len = line_end - line_start;
         if (self.cursor.col < line_len) {
-            // Advance by grapheme cluster
-            const data = self.buffer.getRange(self.allocator, line_start, line_end) catch {
-                const abs_pos = line_start + self.cursor.col;
-                const next_pos = self.buffer.nextCodepointStart(abs_pos);
-                self.cursor.moveTo(self.cursor.line, @min(next_pos - line_start, line_len));
-                self.ensureCursorVisible();
-                return;
-            };
-            defer self.allocator.free(data);
-            const cl = nextClusterLen(data, self.cursor.col);
-            const new_col = @min(self.cursor.col + cl, line_len);
-            self.cursor.moveTo(self.cursor.line, new_col);
+            const abs_pos = line_start + self.cursor.col;
+            const byte = self.buffer.byteAt(abs_pos) orelse 0;
+
+            if (byte < 0x80) {
+                // ASCII fast path: always 1 byte, no cluster
+                self.cursor.moveTo(self.cursor.line, self.cursor.col + 1);
+            } else {
+                // Non-ASCII: use cluster-aware advancement
+                const data = self.buffer.getRange(self.allocator, line_start, line_end) catch {
+                    const next_pos = self.buffer.nextCodepointStart(abs_pos);
+                    self.cursor.moveTo(self.cursor.line, @min(next_pos - line_start, line_len));
+                    self.ensureCursorVisible();
+                    return;
+                };
+                defer self.allocator.free(data);
+                const cl = nextClusterLen(data, self.cursor.col);
+                self.cursor.moveTo(self.cursor.line, @min(self.cursor.col + cl, line_len));
+            }
         } else if (self.cursor.line < self.buffer.lineCount() -| 1) {
             self.cursor.moveTo(self.cursor.line + 1, 0);
         }
