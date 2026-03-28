@@ -4,7 +4,30 @@ import Combine
 import MatchaKit
 
 class TabManager: ObservableObject {
-    static weak var current: TabManager?
+    private static var allInstances: [WeakTabRef] = []
+
+    private final class WeakTabRef {
+        weak var value: TabManager?
+        init(_ v: TabManager) { value = v }
+    }
+
+    static var current: TabManager? {
+        allInstances.first(where: { $0.value != nil })?.value
+    }
+
+    static var allHasUnsaved: Bool {
+        allInstances.removeAll(where: { $0.value == nil })
+        return allInstances.contains { ref in
+            ref.value?.tabs.contains { $0.isModified } ?? false
+        }
+    }
+
+    static var allUnsavedCount: Int {
+        allInstances.removeAll(where: { $0.value == nil })
+        return allInstances.reduce(0) { sum, ref in
+            sum + (ref.value?.tabs.filter { $0.isModified }.count ?? 0)
+        }
+    }
 
     let config: MatchaConfig
     private var editorCancellables: [UUID: AnyCancellable] = [:]
@@ -47,7 +70,7 @@ class TabManager: ObservableObject {
         let tab = Tab(editor: editor)
         tabs.append(tab)
         observeEditor(editor, id: tab.id)
-        TabManager.current = self
+        TabManager.allInstances.append(WeakTabRef(self))
     }
 
     private func observeEditor(_ editor: MatchaEditor, id: UUID) {
@@ -67,7 +90,14 @@ class TabManager: ObservableObject {
 
     func openInNewTab(path: String) {
         let editor = MatchaEditor(config: config)
-        _ = editor.openFile(path: path)
+        guard editor.openFile(path: path) else {
+            // Read error directly — openFile's updateInfo already consumed getLastError
+            let alert = NSAlert()
+            alert.messageText = "Could not open file"
+            alert.informativeText = (path as NSString).lastPathComponent
+            alert.runModal()
+            return
+        }
         let tab = Tab(editor: editor)
         tabs.append(tab)
         activeIndex = tabs.count - 1

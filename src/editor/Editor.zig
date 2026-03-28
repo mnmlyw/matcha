@@ -136,7 +136,8 @@ pub const Editor = struct {
         self.undo_stack.deinit();
         self.undo_stack = UndoStack.init(self.allocator);
         self.modified = false;
-        self.save_version = self.current_version;
+        self.current_version = 0;
+        self.save_version = 0;
         self.save_reachable = true;
         self.scroll_x = 0;
         self.scroll_y = 0;
@@ -176,7 +177,8 @@ pub const Editor = struct {
         self.undo_stack.deinit();
         self.undo_stack = UndoStack.init(self.allocator);
         self.modified = false;
-        self.save_version = self.current_version;
+        self.current_version = 0;
+        self.save_version = 0;
         self.save_reachable = true;
         self.scroll_x = 0;
         self.scroll_y = 0;

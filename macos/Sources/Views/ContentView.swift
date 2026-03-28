@@ -347,9 +347,11 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .matchaDismissCompletion)) { _ in
+                guard isKeyWindow else { return }
                 showCompletion = false
             }
             .onReceive(NotificationCenter.default.publisher(for: .matchaCompletionNavigate)) { notification in
+                guard isKeyWindow else { return }
                 if let index = notification.userInfo?["index"] as? Int { completionSelectedIndex = index }
             }
     }
@@ -357,10 +359,14 @@ struct ContentView: View {
     private func handleOnAppear() {
         editor?.markActive()
 
-        // Handle pending file from "Open..." menu when no window was open
-        if let path = AppDelegate.pendingFilePath {
-            AppDelegate.pendingFilePath = nil
-            tabManager.openInCurrentTab(path: path)
+        // Handle pending files from "Open With" or cold launch
+        if !AppDelegate.pendingFilePaths.isEmpty {
+            let paths = AppDelegate.pendingFilePaths
+            AppDelegate.pendingFilePaths = []
+            tabManager.openInCurrentTab(path: paths[0])
+            for path in paths.dropFirst() {
+                tabManager.openInNewTab(path: path)
+            }
             return
         }
 

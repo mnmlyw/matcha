@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
         "sh", "-c",
         \\set -e
         \\SDK=$(xcrun --show-sdk-path)
-        \\MACOS_VER=$(sw_vers -productVersion | cut -d. -f1,2)
+        \\MACOS_VER=14.0
         \\TARGET_ARCH=$(uname -m)
         \\APP=zig-out/Matcha.app/Contents/MacOS
         \\mkdir -p "$APP"

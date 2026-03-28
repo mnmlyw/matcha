@@ -817,6 +817,9 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
                 options: [.urlReadingFileURLsOnly: true]) as? [URL],
               let url = urls.first else { return false }
-        return editor.openFile(path: url.path)
+        // Route through ContentView's open-file flow (respects unsaved tabs)
+        NotificationCenter.default.post(name: .matchaOpenFilePath, object: nil,
+                                        userInfo: ["path": url.path])
+        return true
     }
 }

@@ -821,7 +821,7 @@ export fn matcha_editor_get_info(ed: ?*Editor) EditorInfo {
     };
     return .{
         .cursor_line = e.cursor.line + 1, // 1-based for display
-        .cursor_col = e.cursor.col + 1,
+        .cursor_col = e.byteColToVisualCol(e.cursor.line, e.cursor.col) + 1,
         .total_lines = e.buffer.lineCount(),
         .modified = e.modified,
         .filename = if (e.filename_z) |z| z.ptr else null,

@@ -111,7 +111,7 @@ struct MatchaApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    static var pendingFilePath: String? = nil
+    static var pendingFilePaths: [String] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Intercept "open documents" Apple Event BEFORE SwiftUI handles it
@@ -151,18 +151,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                                 object: nil,
                                                 userInfo: ["path": path])
             } else {
-                AppDelegate.pendingFilePath = path
+                AppDelegate.pendingFilePaths.append(path)
             }
         }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let tabManager = TabManager.current else { return .terminateNow }
-        let unsavedTabs = tabManager.tabs.filter { $0.isModified }
-        if unsavedTabs.isEmpty { return .terminateNow }
+        let count = TabManager.allUnsavedCount
+        if count == 0 { return .terminateNow }
 
         let alert = NSAlert()
-        alert.messageText = "You have \(unsavedTabs.count) unsaved file\(unsavedTabs.count == 1 ? "" : "s")."
+        alert.messageText = "You have \(count) unsaved file\(count == 1 ? "" : "s")."
         alert.informativeText = "Your changes will be lost if you quit without saving."
         alert.addButton(withTitle: "Quit Anyway")
         alert.addButton(withTitle: "Cancel")
@@ -190,7 +189,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseFiles = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        AppDelegate.pendingFilePath = url.path
+        AppDelegate.pendingFilePaths.append(url.path)
         newWindowAction()
     }
 }
