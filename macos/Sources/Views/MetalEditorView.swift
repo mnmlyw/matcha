@@ -647,6 +647,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         }
 
         inputHandled = true
+        inlineHint = nil // clear stale hint during IME composition
         requestRedraw()
     }
 
