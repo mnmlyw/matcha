@@ -27,6 +27,7 @@ comptime {
 
 test {
     _ = @import("buffer/PieceTable.zig");
+    _ = @import("buffer/UnicodeIterator.zig");
     _ = @import("editor/Editor.zig");
     _ = @import("editor/Cursor.zig");
     _ = @import("editor/Selection.zig");

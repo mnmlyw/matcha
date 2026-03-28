@@ -14,6 +14,7 @@ class MatchaEditor: ObservableObject {
 
     @Published var info: EditorInfo = EditorInfo()
     @Published var lastError: String? = nil
+    private(set) var currentError: String? = nil
 
     struct EditorInfo {
         var cursorLine: UInt32 = 1
@@ -463,6 +464,7 @@ class MatchaEditor: ObservableObject {
         // filename is a borrowed pointer (valid until next editor mutation), no need to free
         let fname: String? = cInfo.filename.map { String(cString: $0) }
         let error = getLastError()
+        currentError = error
         DispatchQueue.main.async { [weak self] in
             self?.info = EditorInfo(
                 cursorLine: cInfo.cursor_line,

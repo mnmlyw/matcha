@@ -11,6 +11,7 @@ const RenderState = @import("../render/RenderState.zig").RenderState;
 const Language = @import("../highlight/Language.zig").Language;
 const UnicodeUtil = @import("../buffer/UnicodeIterator.zig");
 const charWidth = UnicodeUtil.charWidth;
+const clusterWidth = UnicodeUtil.clusterWidth;
 const nextClusterLen = UnicodeUtil.nextClusterLen;
 
 pub const Editor = struct {
@@ -550,7 +551,7 @@ pub const Editor = struct {
             }
 
             const branched = try self.undo_stack.commit();
-        self.markDirty(branched);
+            self.markDirty(branched);
             self.invalidateCaches();
             // Only adjust col if the cursor/anchor line was actually indented
             if (self.cursor.line >= range.start_line and self.cursor.line <= range.end_line) {
@@ -645,7 +646,7 @@ pub const Editor = struct {
 
         if (change_count > 0) {
             const branched = try self.undo_stack.commit();
-        self.markDirty(branched);
+            self.markDirty(branched);
             self.invalidateCaches();
         }
         self.cursor.target_col = self.cursor.col;
@@ -1621,7 +1622,7 @@ pub const Editor = struct {
 
         if (count > 0) {
             const branched = try self.undo_stack.commit();
-        self.markDirty(branched);
+            self.markDirty(branched);
             self.invalidateCaches();
         }
         return count;
@@ -1681,6 +1682,34 @@ pub const Editor = struct {
         return self.wideCellPixelWidth();
     }
 
+    fn tabVisualWidth(self: *const Editor, visual_col: u32) u32 {
+        const tab_size = @max(self.config.tab_size, 1);
+        const remainder = visual_col % tab_size;
+        return if (remainder == 0) tab_size else tab_size - remainder;
+    }
+
+    pub fn visualWidthForClusterAt(self: *const Editor, data: []const u8, pos: u32, visual_col: u32) u32 {
+        if (pos < data.len and data[pos] == '\t') return self.tabVisualWidth(visual_col);
+        return clusterWidth(data, pos);
+    }
+
+    pub fn pixelWidthForCluster(self: *const Editor, data: []const u8, pos: u32) f32 {
+        const cw = clusterWidth(data, pos);
+        if (cw == 0) return 0;
+        if (cw == 1) return self.cell_width;
+
+        const cp = decodeContentCp(data, pos);
+        if (isHangulWideCodepoint(cp)) return self.hangulCellPixelWidth();
+        return self.wideCellPixelWidth();
+    }
+
+    pub fn pixelWidthForClusterAt(self: *const Editor, data: []const u8, pos: u32, visual_col: u32) f32 {
+        if (pos < data.len and data[pos] == '\t') {
+            return @as(f32, @floatFromInt(self.tabVisualWidth(visual_col))) * self.cell_width;
+        }
+        return self.pixelWidthForCluster(data, pos);
+    }
+
     pub fn wrapWidthPixels(self: *const Editor) f32 {
         const gutter_w = self.gutterWidth();
         const view_w = @as(f32, @floatFromInt(self.viewport_width)) - gutter_w;
@@ -1714,19 +1743,28 @@ pub const Editor = struct {
         if (wrap_width > 0) {
             var scan_pos: u32 = 0;
             var scan_x: f32 = 0;
+            var scan_vcol: u32 = 0;
             var scan_last_space: u32 = 0;
+            var scan_last_space_vcol: u32 = 0;
             var scan_has_space = false;
 
             while (scan_pos < line_len) {
                 if (scan_x >= wrap_width and scan_x > 0) {
                     if (scan_has_space) {
-                        if (num_breaks < 4096) { break_positions[num_breaks] = scan_last_space; num_breaks += 1; }
+                        if (num_breaks < 4096) {
+                            break_positions[num_breaks] = scan_last_space;
+                            num_breaks += 1;
+                        }
                         scan_pos = scan_last_space;
+                        scan_vcol = scan_last_space_vcol;
                         scan_x = 0;
                         scan_has_space = false;
                         continue;
                     } else {
-                        if (num_breaks < 4096) { break_positions[num_breaks] = scan_pos; num_breaks += 1; }
+                        if (num_breaks < 4096) {
+                            break_positions[num_breaks] = scan_pos;
+                            num_breaks += 1;
+                        }
                         scan_x = 0;
                         scan_has_space = false;
                     }
@@ -1734,18 +1772,17 @@ pub const Editor = struct {
                 if (data[scan_pos] == '\n') break;
                 const cluster_len = nextClusterLen(data, scan_pos);
                 if (cluster_len == 0) break;
-                const cp = decodeContentCp(data, scan_pos);
-                const px_w = if (cluster_len > PieceTable.codepointByteLen(data[scan_pos]))
-                    self.pixelWidthForCodepoint(cp) // multi-codepoint cluster
-                else
-                    self.pixelWidthForCodepoint(cp);
+                const cw = self.visualWidthForClusterAt(data, scan_pos, scan_vcol);
+                const px_w = self.pixelWidthForClusterAt(data, scan_pos, scan_vcol);
 
                 if (data[scan_pos] == ' ' or data[scan_pos] == '\t') {
                     scan_has_space = true;
                     scan_last_space = scan_pos + cluster_len;
+                    scan_last_space_vcol = scan_vcol + cw;
                 }
 
                 scan_pos += cluster_len;
+                scan_vcol += cw;
                 scan_x += px_w;
             }
         }
@@ -1762,15 +1799,17 @@ pub const Editor = struct {
         var segment_x: f32 = 0;
         var total_x: f32 = 0;
         var pos: u32 = 0;
+        var vcol: u32 = 0;
         while (pos < byte_col and pos < line_len) {
             if (data[pos] == '\n') break;
             const cluster_len = nextClusterLen(data, pos);
             if (cluster_len == 0) break;
-            const cp = decodeContentCp(data, pos);
-            const px_w = self.pixelWidthForCodepoint(cp);
+            const cw = self.visualWidthForClusterAt(data, pos, vcol);
+            const px_w = self.pixelWidthForClusterAt(data, pos, vcol);
             total_x += px_w;
             if (pos >= seg_start) segment_x += px_w;
             pos += cluster_len;
+            vcol += cw;
         }
 
         return .{ .segment = segment, .segment_x = segment_x, .total_x = total_x };
@@ -1789,18 +1828,25 @@ pub const Editor = struct {
         var pos: u32 = 0;
         var segment: u32 = 0;
         var segment_x: f32 = 0;
+        var vcol: u32 = 0;
         var has_space = false;
         var last_space_pos: u32 = 0;
+        var last_space_vcol: u32 = 0;
 
         while (pos < line_len) {
             if (wrap_width > 0 and segment_x >= wrap_width and segment_x > 0) {
                 if (has_space) {
-                    if (target_segment) |target| { if (segment == target) return last_space_pos; }
+                    if (target_segment) |target| {
+                        if (segment == target) return last_space_pos;
+                    }
                     pos = last_space_pos;
+                    vcol = last_space_vcol;
                     segment_x = 0;
                     has_space = false;
                 } else {
-                    if (target_segment) |target| { if (segment == target) return pos; }
+                    if (target_segment) |target| {
+                        if (segment == target) return pos;
+                    }
                     segment_x = 0;
                 }
                 segment += 1;
@@ -1808,18 +1854,18 @@ pub const Editor = struct {
             if (data[pos] == '\n') break;
             const cluster_len = nextClusterLen(data, pos);
             if (cluster_len == 0) break;
-            const cp = decodeContentCp(data, pos);
-            const is_cluster = cluster_len > PieceTable.codepointByteLen(data[pos]);
-            const char_px_w = self.pixelWidthForCodepoint(cp);
+            const cw = self.visualWidthForClusterAt(data, pos, vcol);
+            const char_px_w = self.pixelWidthForClusterAt(data, pos, vcol);
 
             if (data[pos] == ' ' or data[pos] == '\t') {
                 has_space = true;
                 last_space_pos = pos + cluster_len;
+                last_space_vcol = vcol + cw;
             }
 
             if (target_segment == null or segment == target_segment.?) {
                 if (target_x < segment_x + char_px_w) {
-                    if ((is_cluster or charWidth(cp) > 1) and target_x >= segment_x + char_px_w / 2.0) {
+                    if (cw > 1 and target_x >= segment_x + char_px_w / 2.0) {
                         return pos + cluster_len;
                     }
                     return pos;
@@ -1827,6 +1873,7 @@ pub const Editor = struct {
             }
 
             pos += cluster_len;
+            vcol += cw;
             segment_x += char_px_w;
         }
 
@@ -1849,8 +1896,7 @@ pub const Editor = struct {
             if (data[pos] == '\n') break;
             const cluster_len = nextClusterLen(data, pos);
             if (cluster_len == 0) break;
-            const cp = decodeContentCp(data, pos);
-            const cw: u32 = if (cluster_len > PieceTable.codepointByteLen(data[pos])) 2 else charWidth(cp);
+            const cw = self.visualWidthForClusterAt(data, pos, vcol);
             pos += cluster_len;
             vcol += cw;
         }
@@ -1871,8 +1917,7 @@ pub const Editor = struct {
             if (data[pos] == '\n') break;
             const cluster_len = nextClusterLen(data, pos);
             if (cluster_len == 0) break;
-            const cp = decodeContentCp(data, pos);
-            const cw: u32 = if (cluster_len > PieceTable.codepointByteLen(data[pos])) 2 else charWidth(cp);
+            const cw = self.visualWidthForClusterAt(data, pos, v);
             pos += cluster_len;
             v += cw;
         }
@@ -1923,6 +1968,7 @@ pub const Editor = struct {
             self.wrap_prefix_sums.appendAssumeCapacity(0);
             var running: u32 = 0;
             var line_rows: u32 = 1;
+            var line_vcol: u32 = 0;
             var seg_x: f32 = 0;
             var has_space = false;
             var seg_x_at_space: f32 = 0;
@@ -1933,6 +1979,7 @@ pub const Editor = struct {
                     running += line_rows;
                     self.wrap_prefix_sums.append(self.allocator, running) catch return;
                     line_rows = 1;
+                    line_vcol = 0;
                     seg_x = 0;
                     has_space = false;
                     i += 1;
@@ -1952,8 +1999,8 @@ pub const Editor = struct {
 
                 const cluster_len = nextClusterLen(content, @intCast(i));
                 if (cluster_len == 0) break;
-                const cp = decodeContentCp(content, i);
-                const px_w = self.pixelWidthForCodepoint(cp);
+                const cw = self.visualWidthForClusterAt(content, @intCast(i), line_vcol);
+                const px_w = self.pixelWidthForClusterAt(content, @intCast(i), line_vcol);
 
                 if (content[i] == ' ' or content[i] == '\t') {
                     has_space = true;
@@ -1961,6 +2008,7 @@ pub const Editor = struct {
                 }
 
                 i += cluster_len;
+                line_vcol += cw;
                 seg_x += px_w;
             }
 
@@ -2094,7 +2142,7 @@ pub const Editor = struct {
             try self.undo_stack.record(.insert, start_pos, wrapped);
             try self.buffer.insert(start_pos, wrapped);
             const branched = try self.undo_stack.commit();
-        self.markDirty(branched);
+            self.markDirty(branched);
 
             const end_lc = self.buffer.posToLineCol(start_pos + @as(u32, @intCast(wrapped.len)));
             self.selection.clear();
@@ -2104,7 +2152,7 @@ pub const Editor = struct {
             try self.undo_stack.record(.insert, cursor_pos, &pair);
             try self.buffer.insert(cursor_pos, &pair);
             const branched = try self.undo_stack.commit();
-        self.markDirty(branched);
+            self.markDirty(branched);
 
             const lc = self.buffer.posToLineCol(cursor_pos + 1);
             self.cursor.moveTo(lc.line, lc.col);
@@ -2905,6 +2953,56 @@ test "Editor: replaceAllWithOptions respects whole-word matching" {
 
     try testing.expectEqual(@as(u32, 2), replaced);
     try expectContent(&ed, "dog scatter dog");
+}
+
+test "Editor: visual columns keep combining clusters in one cell" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    const cluster = "e\u{0301}";
+    try ed.insertText(cluster);
+
+    try testing.expectEqual(@as(u32, 1), ed.byteColToVisualCol(0, @intCast(cluster.len)));
+    try testing.expectEqual(@as(u32, @intCast(cluster.len)), ed.visualColToByteCol(0, 1));
+}
+
+test "Editor: literal tabs use tab stops for visual columns and hit testing" {
+    var config = Config.defaults();
+    config.insert_spaces = false;
+    config.tab_size = 4;
+    config.line_numbers = false;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(20, 4, 1, 1);
+    try ed.insertText("a\tb");
+
+    try testing.expectEqual(@as(u32, 4), ed.byteColToVisualCol(0, 2));
+    try testing.expectEqual(@as(u32, 2), ed.visualColToByteCol(0, 4));
+
+    ed.click(1.4, 0.5, false);
+    try testing.expectEqual(@as(u32, 1), ed.cursor.col);
+
+    ed.click(2.6, 0.5, false);
+    try testing.expectEqual(@as(u32, 2), ed.cursor.col);
+}
+
+test "Editor: literal tabs wrap at tab stops" {
+    var config = Config.defaults();
+    config.insert_spaces = false;
+    config.tab_size = 4;
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(4, 8, 1, 1);
+    try ed.insertText("\t\t");
+
+    try testing.expectEqual(@as(u32, 2), ed.lineVisualRows(0));
 }
 
 test "Editor: non-wrapped horizontal scroll uses full line width" {

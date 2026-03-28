@@ -1,3 +1,6 @@
+const std = @import("std");
+const testing = std.testing;
+
 /// Returns the display width of a Unicode codepoint.
 /// CJK ideographs and fullwidth forms return 2; everything else returns 1.
 pub fn charWidth(cp: u32) u2 {
@@ -36,6 +39,51 @@ pub fn charWidth(cp: u32) u2 {
     if (cp <= 0x3FFFD) return 2;
 
     return 1;
+}
+
+/// Returns the display width of the grapheme cluster starting at `pos` in `data`.
+pub fn clusterWidth(data: []const u8, pos: u32) u2 {
+    const p: usize = pos;
+    if (p >= data.len) return 0;
+
+    const first_cp = decodeCpAt(data, p);
+    const first_byte_len = cpByteLenAt(data, p);
+    var width: u2 = charWidth(first_cp);
+    var end: usize = p + first_byte_len;
+
+    // Regional indicators always render as a single flag glyph.
+    if (first_cp >= 0x1F1E6 and first_cp <= 0x1F1FF) {
+        if (end < data.len) {
+            const next_cp = decodeCpAt(data, end);
+            if (next_cp >= 0x1F1E6 and next_cp <= 0x1F1FF) {
+                end += cpByteLenAt(data, end);
+            }
+        }
+        return 2;
+    }
+
+    while (end < data.len) {
+        const next_cp = decodeCpAt(data, end);
+        const next_len = cpByteLenAt(data, end);
+
+        if (isExtender(next_cp)) {
+            width = @max(width, charWidth(next_cp));
+            if (extenderForcesWide(next_cp)) width = 2;
+            end += next_len;
+        } else if (next_cp == 0x200D) {
+            // ZWJ sequences inherit the widest participating glyph.
+            const after_zwj = end + next_len;
+            if (after_zwj >= data.len) break;
+            const joined_cp = decodeCpAt(data, after_zwj);
+            width = @max(width, charWidth(joined_cp));
+            end = after_zwj + cpByteLenAt(data, after_zwj);
+            if (end > data.len) end = data.len;
+        } else {
+            break;
+        }
+    }
+
+    return width;
 }
 
 /// Returns the byte length of the grapheme cluster starting at `pos` in `data`.
@@ -92,6 +140,12 @@ fn isExtender(cp: u32) bool {
     if (cp >= 0xFE20 and cp <= 0xFE2F) return true;
     if (cp >= 0xE0020 and cp <= 0xE007F) return true; // tag sequences (flag subdivisions)
     if (cp == 0xE0001) return true; // language tag
+    return false;
+}
+
+fn extenderForcesWide(cp: u32) bool {
+    if (cp == 0xFE0F or cp == 0x20E3) return true;
+    if (cp >= 0x1F3FB and cp <= 0x1F3FF) return true;
     return false;
 }
 
@@ -156,19 +210,28 @@ pub const UnicodeIterator = struct {
             self.pos += 1;
             return 0xFFFD; // replacement char
         } else if (b0 < 0xE0) {
-            if (self.pos + 1 >= self.data.len) { self.pos += 1; return 0xFFFD; }
+            if (self.pos + 1 >= self.data.len) {
+                self.pos += 1;
+                return 0xFFFD;
+            }
             const cp = (@as(u32, b0 & 0x1F) << 6) | @as(u32, self.data[self.pos + 1] & 0x3F);
             self.pos += 2;
             return cp;
         } else if (b0 < 0xF0) {
-            if (self.pos + 2 >= self.data.len) { self.pos += 1; return 0xFFFD; }
+            if (self.pos + 2 >= self.data.len) {
+                self.pos += 1;
+                return 0xFFFD;
+            }
             const cp = (@as(u32, b0 & 0x0F) << 12) |
                 (@as(u32, self.data[self.pos + 1] & 0x3F) << 6) |
                 @as(u32, self.data[self.pos + 2] & 0x3F);
             self.pos += 3;
             return cp;
         } else {
-            if (self.pos + 3 >= self.data.len) { self.pos += 1; return 0xFFFD; }
+            if (self.pos + 3 >= self.data.len) {
+                self.pos += 1;
+                return 0xFFFD;
+            }
             const cp = (@as(u32, b0 & 0x07) << 18) |
                 (@as(u32, self.data[self.pos + 1] & 0x3F) << 12) |
                 (@as(u32, self.data[self.pos + 2] & 0x3F) << 6) |
@@ -178,3 +241,18 @@ pub const UnicodeIterator = struct {
         }
     }
 };
+
+test "Unicode: clusterWidth keeps combining clusters narrow" {
+    const text = "e\u{0301}";
+    try testing.expectEqual(@as(u2, 1), clusterWidth(text, 0));
+}
+
+test "Unicode: clusterWidth keeps emoji keycaps wide" {
+    const text = "1\u{FE0F}\u{20E3}";
+    try testing.expectEqual(@as(u2, 2), clusterWidth(text, 0));
+}
+
+test "Unicode: clusterWidth keeps non-emoji ZWJ clusters narrow" {
+    const text = "a\u{200D}b";
+    try testing.expectEqual(@as(u2, 1), clusterWidth(text, 0));
+}

@@ -91,10 +91,9 @@ class TabManager: ObservableObject {
     func openInNewTab(path: String) {
         let editor = MatchaEditor(config: config)
         guard editor.openFile(path: path) else {
-            // Read error directly — openFile's updateInfo already consumed getLastError
             let alert = NSAlert()
             alert.messageText = "Could not open file"
-            alert.informativeText = (path as NSString).lastPathComponent
+            alert.informativeText = editor.currentError ?? (path as NSString).lastPathComponent
             alert.runModal()
             return
         }

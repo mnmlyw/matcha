@@ -5,7 +5,6 @@ const Lexer = @import("../highlight/Lexer.zig");
 const Language = @import("../highlight/Language.zig").Language;
 const PieceTable = @import("../buffer/PieceTable.zig").PieceTable;
 const UnicodeUtil = @import("../buffer/UnicodeIterator.zig");
-const charWidth = UnicodeUtil.charWidth;
 const nextClusterLen = UnicodeUtil.nextClusterLen;
 const CLUSTER_SENTINEL = UnicodeUtil.CLUSTER_SENTINEL;
 
@@ -314,8 +313,8 @@ pub const RenderState = struct {
                 const codepoint = decodeCodepointFromSlice(line_data, col);
                 const cluster_len = nextClusterLen(line_data, col);
                 const is_cluster = cluster_len > cp_len;
-                const cw: u32 = if (is_cluster) 2 else charWidth(codepoint);
-                const char_px_w = if (is_cluster) editor.pixelWidthForCodepoint(codepoint) else editor.pixelWidthForCodepoint(codepoint);
+                const cw = editor.visualWidthForClusterAt(line_data, col, vcol);
+                const char_px_w = editor.pixelWidthForClusterAt(line_data, col, vcol);
 
                 // For multi-codepoint clusters, store bytes and encode as special glyph_index
                 var glyph_index: u32 = codepoint;
@@ -392,14 +391,16 @@ pub const RenderState = struct {
                 const tab_px = @as(f32, @floatFromInt(config.tab_size)) * cell_w;
                 // Count leading whitespace
                 var indent_bytes: u32 = 0;
+                var indent_vcol: u32 = 0;
                 while (indent_bytes < content_len and
                     (line_data[indent_bytes] == ' ' or line_data[indent_bytes] == '\t'))
                 {
+                    indent_vcol += editor.visualWidthForClusterAt(line_data, indent_bytes, indent_vcol);
                     indent_bytes += 1;
                 }
                 if (indent_bytes > 0 and indent_bytes < content_len) {
                     var guide_x = tab_px;
-                    const indent_px = @as(f32, @floatFromInt(indent_bytes)) * cell_w;
+                    const indent_px = @as(f32, @floatFromInt(indent_vcol)) * cell_w;
                     const guide_y = @as(f32, @floatFromInt(line_base_vrow)) * cell_h - editor.scroll_y;
                     while (guide_x < indent_px) : (guide_x += tab_px) {
                         const screen_x = if (wrap_enabled) guide_x + gutter_w else guide_x - editor.scroll_x + gutter_w;
@@ -423,16 +424,47 @@ pub const RenderState = struct {
                     trail_end -= 1;
                 }
                 if (trail_end > 0 and trail_end < content_len) {
-                    const trail_count = content_len - trail_end;
-                    const trail_px_w = @as(f32, @floatFromInt(trail_count)) * cell_w;
-                    const trail_x = @max(0, seg_x_offset - trail_px_w);
-                    const trail_y = @as(f32, @floatFromInt(line_base_vrow + last_seg)) * cell_h - editor.scroll_y;
-                    const trail_screen_x = if (wrap_enabled) trail_x + gutter_w else trail_x - editor.scroll_x + gutter_w;
-                    if (trail_y + cell_h >= 0 and trail_y <= vp_h) {
+                    const trail_metrics = editor.byteColToPixelMetrics(line, trail_end);
+                    var trail_pos = trail_end;
+                    var trail_vcol = editor.byteColToVisualCol(line, trail_end);
+                    var trail_seg = trail_metrics.segment;
+                    var trail_seg_x = trail_metrics.segment_x;
+                    var rect_start_seg = trail_seg;
+                    var rect_start_x = trail_seg_x;
+
+                    while (trail_pos < content_len) {
+                        if (wrap_enabled and trail_seg_x >= wrap_width and trail_seg_x > 0) {
+                            const trail_y = @as(f32, @floatFromInt(line_base_vrow + rect_start_seg)) * cell_h - editor.scroll_y;
+                            const trail_screen_x = if (wrap_enabled) rect_start_x + gutter_w else rect_start_x - editor.scroll_x + gutter_w;
+                            if (trail_seg_x > rect_start_x and trail_y + cell_h >= 0 and trail_y <= vp_h) {
+                                self.selections.append(self.allocator, .{
+                                    .x = trail_screen_x,
+                                    .y = trail_y,
+                                    .w = trail_seg_x - rect_start_x,
+                                    .h = cell_h,
+                                    .color = config.trailing_ws_color,
+                                }) catch {};
+                            }
+                            trail_seg += 1;
+                            trail_seg_x = 0;
+                            rect_start_seg = trail_seg;
+                            rect_start_x = 0;
+                        }
+
+                        const cluster_len = nextClusterLen(line_data, trail_pos);
+                        if (cluster_len == 0) break;
+                        trail_seg_x += editor.pixelWidthForClusterAt(line_data, trail_pos, trail_vcol);
+                        trail_vcol += editor.visualWidthForClusterAt(line_data, trail_pos, trail_vcol);
+                        trail_pos += cluster_len;
+                    }
+
+                    const trail_y = @as(f32, @floatFromInt(line_base_vrow + rect_start_seg)) * cell_h - editor.scroll_y;
+                    const trail_screen_x = if (wrap_enabled) rect_start_x + gutter_w else rect_start_x - editor.scroll_x + gutter_w;
+                    if (trail_seg_x > rect_start_x and trail_y + cell_h >= 0 and trail_y <= vp_h) {
                         self.selections.append(self.allocator, .{
                             .x = trail_screen_x,
                             .y = trail_y,
-                            .w = trail_px_w,
+                            .w = trail_seg_x - rect_start_x,
                             .h = cell_h,
                             .color = config.trailing_ws_color,
                         }) catch {};
@@ -685,6 +717,31 @@ test "RenderState: highlight tokens are reused across redraws without edits" {
     const second_tokens = ed.render_state.line_token_cache.entries.items[0].tokens;
     try testing.expectEqual(first_tokens.ptr, second_tokens.ptr);
     try testing.expectEqual(first_tokens.len, second_tokens.len);
+}
+
+test "RenderState: trailing tab highlight uses tab-stop width" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.insert_spaces = false;
+    config.tab_size = 4;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(20, 4, 1, 1);
+    try ed.insertText("a\t");
+
+    ed.prepareRender();
+
+    var found = false;
+    for (ed.render_state.selections.items) |rect| {
+        if (rect.color == config.trailing_ws_color) {
+            found = true;
+            try testing.expectEqual(@as(f32, 1), rect.x);
+            try testing.expectEqual(@as(f32, 3), rect.w);
+        }
+    }
+    try testing.expect(found);
 }
 
 test "RenderState: fullwidth cells stay aligned with the cursor grid" {
