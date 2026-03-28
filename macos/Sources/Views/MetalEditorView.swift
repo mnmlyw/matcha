@@ -129,6 +129,16 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 alpha: 1.0)
             window.makeFirstResponder(self)
             editor.markActive()
+            // Update renderer if screen scale factor differs (multi-display)
+            if let screen = window.screen, let r = renderer {
+                let newScale = Float(screen.backingScaleFactor)
+                if newScale != r.scaleFactor, let device = self.device {
+                    let scaledFont = NSFont(descriptor: font.fontDescriptor, size: font.pointSize * CGFloat(newScale))!
+                    renderer = MetalRenderer(device: device, view: self, font: scaledFont,
+                                             cellWidth: Float(cellWidth), cellHeight: Float(cellHeight),
+                                             scaleFactor: newScale)
+                }
+            }
             updateViewport()
             requestRedraw()
         }
@@ -447,6 +457,24 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: workItem)
     }
 
+    private func requeryCompletionIfShowing() {
+        guard showCompletion else { return }
+        if let result = editor.getCompletions(), !result.words.isEmpty {
+            completionWords = result.words
+            completionPrefixLen = result.prefixLen
+            completionSelectedIndex = 0
+            let offset = editor.getCursorOffset()
+            let rect = editor.rectForOffset(offset) ?? .zero
+            NotificationCenter.default.post(name: .matchaShowCompletion, object: nil,
+                                            userInfo: ["words": completionWords,
+                                                       "prefixLen": completionPrefixLen,
+                                                       "x": rect.origin.x,
+                                                       "y": rect.origin.y + rect.height])
+        } else {
+            dismissCompletion()
+        }
+    }
+
     private func acceptInlineHint() {
         guard let hint = inlineHint else { return }
         editor.insert(text: hint)
@@ -563,32 +591,17 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         inputHandled = false
         interpretKeyEvents([event])
         if inputHandled {
+            requeryCompletionIfShowing()
             return
         }
 
         if KeyEventHandler.dispatch(event: event, editor: editor) {
             editor.updateInfo()
             requestRedraw()
+            requeryCompletionIfShowing()
             return
         }
 
-        // Re-query completions if popup was/is open (filter-as-you-type)
-        if showCompletion {
-            if let result = editor.getCompletions(), !result.words.isEmpty {
-                completionWords = result.words
-                completionPrefixLen = result.prefixLen
-                completionSelectedIndex = 0
-                let offset = editor.getCursorOffset()
-                let rect = editor.rectForOffset(offset) ?? .zero
-                NotificationCenter.default.post(name: .matchaShowCompletion, object: nil,
-                                                userInfo: ["words": completionWords,
-                                                           "prefixLen": completionPrefixLen,
-                                                           "x": rect.origin.x,
-                                                           "y": rect.origin.y + rect.height])
-            } else {
-                dismissCompletion()
-            }
-        }
     }
 
     override func doCommand(by selector: Selector) {

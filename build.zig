@@ -202,12 +202,6 @@ pub fn build(b: *std.Build) void {
             \\cp "$ICONS/icon_1024x1024.png" "$ICONSET/icon_512x512@2x.png"
             \\iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
             \\rm -rf "$ICONSET"
-            \\case "$SWIFT_TARGET" in
-            \\  x86_64-*)
-            \\    STACK_PROBE_OBJ="$APP/zig_probe_stack_x86_64.o"
-            \\    xcrun clang -target "$SWIFT_TARGET" -isysroot "$SDK" -c macos/Sources/Support/zig_probe_stack_x86_64.s -o "$STACK_PROBE_OBJ"
-            \\    ;;
-            \\esac
             \\swiftc \
             \\  -swift-version 5 \
             \\  -sdk "$SDK" \

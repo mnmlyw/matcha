@@ -325,8 +325,22 @@ pub const Editor = struct {
         const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
         if (pos == 0) return;
 
-        // Find start of previous codepoint
-        const prev_pos = self.buffer.prevCodepointStart(pos);
+        // Find start of previous grapheme cluster
+        const line_start = self.buffer.lineStart(self.cursor.line);
+        const line_data = self.buffer.getRange(self.allocator, line_start, pos) catch return;
+        defer self.allocator.free(line_data);
+        const prev_pos = blk: {
+            // Walk forward through clusters to find which one ends at pos
+            var scan: u32 = 0;
+            var last_start: u32 = 0;
+            while (scan < line_data.len) {
+                last_start = scan;
+                const cl = nextClusterLen(line_data, scan);
+                if (cl == 0) break;
+                scan += cl;
+            }
+            break :blk line_start + last_start;
+        };
         const del_len = pos - prev_pos;
 
         // Get the bytes we're deleting for undo
@@ -358,11 +372,16 @@ pub const Editor = struct {
         const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
         if (pos >= self.buffer.totalLength()) return;
 
-        // Find end of codepoint at current position
-        const next_pos = self.buffer.nextCodepointStart(pos);
-        const del_len = next_pos - pos;
+        // Find end of grapheme cluster at current position
+        const line_start = self.buffer.lineStart(self.cursor.line);
+        const line_end = self.buffer.lineEnd(self.cursor.line);
+        const data = try self.buffer.getRange(self.allocator, line_start, line_end);
+        defer self.allocator.free(data);
+        const col = pos - line_start;
+        const cl = nextClusterLen(data, col);
+        const del_len = if (cl > 0) cl else self.buffer.nextCodepointStart(pos) - pos;
 
-        const del_bytes = try self.buffer.getRange(self.allocator, pos, next_pos);
+        const del_bytes = try self.buffer.getRange(self.allocator, pos, pos + del_len);
         defer self.allocator.free(del_bytes);
 
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
@@ -525,8 +544,8 @@ pub const Editor = struct {
         if (self.selection.active) {
             const line_range = self.selectedLineRange();
             const range = .{ .start_line = line_range.start_line, .end_line = line_range.end_line };
-            var spaces: [16]u8 = [_]u8{' '} ** 16;
-            const space_count: u32 = @min(self.config.tab_size, 16);
+            var spaces: [64]u8 = [_]u8{' '} ** 64;
+            const space_count: u32 = @min(self.config.tab_size, 64);
             const indent_text = if (self.config.insert_spaces) spaces[0..space_count] else "\t";
             const indent_width: u32 = @intCast(indent_text.len);
             var applied_lines: u32 = 0;
@@ -563,8 +582,8 @@ pub const Editor = struct {
             }
             self.ensureCursorVisible();
         } else {
-            var spaces: [16]u8 = [_]u8{' '} ** 16;
-            const n = @min(self.config.tab_size, 16);
+            var spaces: [64]u8 = [_]u8{' '} ** 64;
+            const n = @min(self.config.tab_size, 64);
             if (self.config.insert_spaces) {
                 try self.insertText(spaces[0..n]);
             } else {
@@ -2306,9 +2325,25 @@ pub const Editor = struct {
     fn moveCursorLeft(self: *Editor) void {
         if (self.cursor.col > 0) {
             const line_start = self.buffer.lineStart(self.cursor.line);
-            const abs_pos = line_start + self.cursor.col;
-            const prev_pos = self.buffer.prevCodepointStart(abs_pos);
-            self.cursor.moveTo(self.cursor.line, if (prev_pos >= line_start) prev_pos - line_start else 0);
+            // Walk clusters from line start to find the one before cursor
+            const data = self.buffer.getRange(self.allocator, line_start, line_start + self.cursor.col) catch {
+                // Fallback to codepoint-based movement
+                const abs_pos = line_start + self.cursor.col;
+                const prev_pos = self.buffer.prevCodepointStart(abs_pos);
+                self.cursor.moveTo(self.cursor.line, if (prev_pos >= line_start) prev_pos - line_start else 0);
+                self.ensureCursorVisible();
+                return;
+            };
+            defer self.allocator.free(data);
+            var scan: u32 = 0;
+            var last_start: u32 = 0;
+            while (scan < data.len) {
+                last_start = scan;
+                const cl = nextClusterLen(data, scan);
+                if (cl == 0) break;
+                scan += cl;
+            }
+            self.cursor.moveTo(self.cursor.line, last_start);
         } else if (self.cursor.line > 0) {
             self.cursor.line -= 1;
             const line_len = self.buffer.lineEnd(self.cursor.line) - self.buffer.lineStart(self.cursor.line);
@@ -2319,11 +2354,20 @@ pub const Editor = struct {
 
     fn moveCursorRight(self: *Editor) void {
         const line_start = self.buffer.lineStart(self.cursor.line);
-        const line_len = self.buffer.lineEnd(self.cursor.line) - line_start;
+        const line_end = self.buffer.lineEnd(self.cursor.line);
+        const line_len = line_end - line_start;
         if (self.cursor.col < line_len) {
-            const abs_pos = line_start + self.cursor.col;
-            const next_pos = self.buffer.nextCodepointStart(abs_pos);
-            const new_col = @min(next_pos - line_start, line_len);
+            // Advance by grapheme cluster
+            const data = self.buffer.getRange(self.allocator, line_start, line_end) catch {
+                const abs_pos = line_start + self.cursor.col;
+                const next_pos = self.buffer.nextCodepointStart(abs_pos);
+                self.cursor.moveTo(self.cursor.line, @min(next_pos - line_start, line_len));
+                self.ensureCursorVisible();
+                return;
+            };
+            defer self.allocator.free(data);
+            const cl = nextClusterLen(data, self.cursor.col);
+            const new_col = @min(self.cursor.col + cl, line_len);
             self.cursor.moveTo(self.cursor.line, new_col);
         } else if (self.cursor.line < self.buffer.lineCount() -| 1) {
             self.cursor.moveTo(self.cursor.line + 1, 0);

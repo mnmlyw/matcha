@@ -48,7 +48,7 @@ pub const PieceTable = struct {
                 .length = @intCast(content.len),
             });
         }
-        pt.refreshCaches();
+        try pt.refreshCaches();
         return pt;
     }
 
@@ -86,7 +86,7 @@ pub const PieceTable = struct {
 
         if (self.pieces.items.len == 0) {
             try self.pieces.append(self.allocator, new_piece);
-            self.refreshCaches();
+            try self.refreshCaches();
             return;
         }
 
@@ -102,7 +102,7 @@ pub const PieceTable = struct {
         if (idx >= self.pieces.items.len) {
             // Append at end
             try self.pieces.append(self.allocator, new_piece);
-            self.refreshCaches();
+            try self.refreshCaches();
             return;
         }
 
@@ -132,7 +132,7 @@ pub const PieceTable = struct {
             try self.pieces.insert(self.allocator, idx + 1, new_piece);
             try self.pieces.insert(self.allocator, idx + 2, right);
         }
-        self.refreshCaches();
+        try self.refreshCaches();
     }
 
     /// Delete `len` bytes starting at byte offset `pos`.
@@ -193,7 +193,7 @@ pub const PieceTable = struct {
 
             remaining -= to_delete;
         }
-        self.refreshCaches();
+        try self.refreshCaches();
     }
 
     /// Get the byte at a given position from the appropriate source buffer.
@@ -312,10 +312,10 @@ pub const PieceTable = struct {
         return count;
     }
 
-    fn refreshCaches(self: *PieceTable) void {
+    fn refreshCaches(self: *PieceTable) !void {
         // Single pass: compute total length, line count, and line start offsets
         self.line_starts.clearRetainingCapacity();
-        self.line_starts.append(self.allocator, 0) catch {}; // line 0 starts at byte 0
+        try self.line_starts.append(self.allocator, 0); // line 0 starts at byte 0
 
         var len: u32 = 0;
         var offset: u32 = 0;
@@ -324,7 +324,7 @@ pub const PieceTable = struct {
             const slice = self.sourceSlice(p);
             for (slice) |b| {
                 if (b == '\n') {
-                    self.line_starts.append(self.allocator, offset + 1) catch {};
+                    try self.line_starts.append(self.allocator, offset + 1);
                 }
                 offset += 1;
             }

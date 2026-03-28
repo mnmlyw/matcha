@@ -106,7 +106,12 @@ class TabManager: ObservableObject {
 
     func openInCurrentTab(path: String) {
         guard let editor = activeEditor else { return }
-        _ = editor.openFile(path: path)
+        if !editor.openFile(path: path) {
+            let alert = NSAlert()
+            alert.messageText = "Could not open file"
+            alert.informativeText = editor.currentError ?? (path as NSString).lastPathComponent
+            alert.runModal()
+        }
     }
 
     func closeTab(at index: Int) {
