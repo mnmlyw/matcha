@@ -458,6 +458,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         guard showCompletion, completionSelectedIndex < completionWords.count else { return }
         let word = completionWords[completionSelectedIndex]
         let cursorOffset = editor.getCursorOffset()
+        guard completionPrefixLen <= Int(cursorOffset) else { dismissCompletion(); return }
         let prefixStart = cursorOffset - UInt32(completionPrefixLen)
         editor.replaceRange(start: prefixStart, end: cursorOffset, text: word)
         dismissCompletion()

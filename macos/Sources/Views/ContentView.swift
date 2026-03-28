@@ -93,7 +93,9 @@ struct ContentView: View {
                 cursorX: completionX,
                 cursorY: completionY
             )
-            .position(x: completionX + 100, y: completionY)
+            .fixedSize()
+            .position(x: min(completionX + 110, max(110, CGFloat(NSScreen.main?.frame.width ?? 800) - 110)),
+                      y: completionY + 10)
         }
     }
 
@@ -373,13 +375,18 @@ struct ContentView: View {
         // Handle command-line arguments (first window only)
         guard !Self.didHandleLaunchFile else { return }
         Self.didHandleLaunchFile = true
+        var paths: [String] = []
         for arg in ProcessInfo.processInfo.arguments.dropFirst() {
             let path = arg.hasPrefix("/") ? arg
                 : FileManager.default.currentDirectoryPath + "/" + arg
             if FileManager.default.fileExists(atPath: path) {
-                tabManager.openInCurrentTab(path: path)
-                break
+                paths.append(path)
             }
+        }
+        guard !paths.isEmpty else { return }
+        tabManager.openInCurrentTab(path: paths[0])
+        for path in paths.dropFirst() {
+            tabManager.openInNewTab(path: path)
         }
     }
 }
