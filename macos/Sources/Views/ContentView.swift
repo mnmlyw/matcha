@@ -308,6 +308,14 @@ struct ContentView: View {
                 }
             }
             .onAppear { handleOnAppear() }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+                guard isKeyWindow, !AppDelegate.pendingFilePaths.isEmpty else { return }
+                let paths = AppDelegate.pendingFilePaths
+                AppDelegate.pendingFilePaths = []
+                for path in paths {
+                    tabManager.openInNewTab(path: path)
+                }
+            }
     }
 
     private func withOverlayNotifications<V: View>(_ content: V) -> some View {
