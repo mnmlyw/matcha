@@ -93,6 +93,19 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     override var acceptsFirstResponder: Bool { true }
 
+    @objc private func screenDidChange() { checkScaleFactor() }
+
+    private func checkScaleFactor() {
+        guard let screen = window?.screen, let r = renderer, let device = self.device else { return }
+        let newScale = Float(screen.backingScaleFactor)
+        if newScale != r.scaleFactor {
+            let scaledFont = NSFont(descriptor: font.fontDescriptor, size: font.pointSize * CGFloat(newScale))!
+            renderer = MetalRenderer(device: device, view: self, font: scaledFont,
+                                     cellWidth: Float(cellWidth), cellHeight: Float(cellHeight),
+                                     scaleFactor: newScale)
+        }
+    }
+
     func swapEditor(_ newEditor: MatchaEditor) {
         editor = newEditor
         editor.markActive()
@@ -129,16 +142,11 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 alpha: 1.0)
             window.makeFirstResponder(self)
             editor.markActive()
-            // Update renderer if screen scale factor differs (multi-display)
-            if let screen = window.screen, let r = renderer {
-                let newScale = Float(screen.backingScaleFactor)
-                if newScale != r.scaleFactor, let device = self.device {
-                    let scaledFont = NSFont(descriptor: font.fontDescriptor, size: font.pointSize * CGFloat(newScale))!
-                    renderer = MetalRenderer(device: device, view: self, font: scaledFont,
-                                             cellWidth: Float(cellWidth), cellHeight: Float(cellHeight),
-                                             scaleFactor: newScale)
-                }
-            }
+            // Update renderer when screen scale factor changes (multi-display)
+            checkScaleFactor()
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(screenDidChange),
+                name: NSWindow.didChangeScreenNotification, object: window)
             updateViewport()
             requestRedraw()
         }

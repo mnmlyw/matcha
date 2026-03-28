@@ -325,12 +325,19 @@ pub const Editor = struct {
         const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
         if (pos == 0) return;
 
-        // Find start of previous grapheme cluster
+        // Find start of previous grapheme cluster (or newline if at col 0)
         const line_start = self.buffer.lineStart(self.cursor.line);
-        const line_data = self.buffer.getRange(self.allocator, line_start, pos) catch return;
-        defer self.allocator.free(line_data);
-        const prev_pos = blk: {
-            // Walk forward through clusters to find which one ends at pos
+        var prev_pos: u32 = undefined;
+        var del_len: u32 = undefined;
+
+        if (self.cursor.col == 0) {
+            // At start of line: delete the preceding newline to join lines
+            prev_pos = pos - 1;
+            del_len = 1;
+        } else {
+            // Within a line: find previous cluster boundary
+            const line_data = self.buffer.getRange(self.allocator, line_start, pos) catch return;
+            defer self.allocator.free(line_data);
             var scan: u32 = 0;
             var last_start: u32 = 0;
             while (scan < line_data.len) {
@@ -339,9 +346,9 @@ pub const Editor = struct {
                 if (cl == 0) break;
                 scan += cl;
             }
-            break :blk line_start + last_start;
-        };
-        const del_len = pos - prev_pos;
+            prev_pos = line_start + last_start;
+            del_len = pos - prev_pos;
+        }
 
         // Get the bytes we're deleting for undo
         const del_bytes = try self.buffer.getRange(self.allocator, prev_pos, pos);
