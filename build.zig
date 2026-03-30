@@ -185,6 +185,8 @@ pub fn build(b: *std.Build) void {
             \\STACK_PROBE_OBJ=
             \\rm -rf "$BUNDLE"
             \\mkdir -p "$APP"
+            \\# Fix archive alignment for macOS linker (Zig 0.15 produces misaligned archives)
+            \\ranlib -no_warning_for_no_symbols zig-out/lib/libmatcha.a 2>/dev/null || true
             \\cp "$INFO_PLIST" "$CONTENTS/Info.plist"
             \\mkdir -p "$CONTENTS/Resources"
             \\ICONSET=/tmp/matcha_AppIcon.iconset

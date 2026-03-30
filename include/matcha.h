@@ -147,6 +147,11 @@ void matcha_editor_replace_range(matcha_editor_t ed, uint32_t start, uint32_t en
 void matcha_editor_set_cursor_offset(matcha_editor_t ed, uint32_t pos);
 void matcha_editor_set_selection_offsets(matcha_editor_t ed, uint32_t start, uint32_t end);
 
+// Multi-cursor
+void matcha_editor_select_next_occurrence(matcha_editor_t ed);
+bool matcha_editor_has_multiple_cursors(matcha_editor_t ed);
+void matcha_editor_clear_extra_cursors(matcha_editor_t ed);
+
 // Word completion: returns newline-separated matching words, caller frees with matcha_free_string.
 char* matcha_editor_get_completions(matcha_editor_t ed, uint32_t* prefix_len);
 

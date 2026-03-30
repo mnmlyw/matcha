@@ -572,7 +572,11 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 editor.toggleComment()
                 return
             case "d":
-                editor.duplicateLine()
+                if hasShift {
+                    editor.duplicateLine()
+                } else {
+                    editor.selectNextOccurrence()
+                }
                 return
             case "1", "2", "3", "4", "5", "6", "7", "8", "9":
                 if let n = event.charactersIgnoringModifiers.flatMap({ Int($0) }) {
@@ -590,8 +594,13 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             return
         }
 
-        // Escape: trigger word completion (when no modifiers)
+        // Escape: clear multi-cursors first, then trigger completion
         if event.keyCode == 53 && !modifiers.contains(.command) {
+            if editor.hasMultipleCursors() {
+                editor.clearExtraCursors()
+                requestRedraw()
+                return
+            }
             triggerCompletion()
             return
         }

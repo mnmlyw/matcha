@@ -263,6 +263,12 @@ class MatchaEditor: ObservableObject {
         return (words: words, prefixLen: Int(prefixLen))
     }
 
+    // MARK: - Multi-Cursor
+
+    func selectNextOccurrence() { guard let h = handle else { return }; matcha_editor_select_next_occurrence(h); updateInfo() }
+    func hasMultipleCursors() -> Bool { guard let h = handle else { return false }; return matcha_editor_has_multiple_cursors(h) }
+    func clearExtraCursors() { guard let h = handle else { return }; matcha_editor_clear_extra_cursors(h); updateInfo() }
+
     // MARK: - Undo/Redo
 
     func undo() { guard let h = handle else { return }; matcha_editor_undo(h); updateInfo() }

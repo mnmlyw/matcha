@@ -20,6 +20,11 @@ pub const Editor = struct {
         whole_word: bool = false,
     };
 
+    pub const CursorState = struct {
+        cursor: Cursor,
+        selection: Selection,
+    };
+
     allocator: Allocator,
     buffer: PieceTable,
     cursor: Cursor,
@@ -27,6 +32,10 @@ pub const Editor = struct {
     undo_stack: UndoStack,
     config: *const Config,
     render_state: RenderState,
+
+    // Multi-cursor state
+    extra_cursors: std.ArrayListUnmanaged(CursorState) = .{},
+    multi_cursor_word: ?[]u8 = null,
 
     // Viewport
     viewport_width: u32 = 800,
@@ -87,6 +96,8 @@ pub const Editor = struct {
         self.render_state.deinit();
         self.wrap_prefix_sums.deinit(self.allocator);
         self.search_content_cache.deinit(self.allocator);
+        self.extra_cursors.deinit(self.allocator);
+        if (self.multi_cursor_word) |w| self.allocator.free(w);
         if (self.filename_z) |z| self.allocator.free(z);
         if (self.filename_owned) {
             if (self.filename) |f| self.allocator.free(f);
@@ -229,6 +240,7 @@ pub const Editor = struct {
     // ── Editing ────────────────────────────────────────────────
 
     pub fn insertText(self: *Editor, text: []const u8) !void {
+        if (self.hasMultipleCursors()) return self.multiCursorInsert(text);
         try self.insertTextWithOptions(text, true);
     }
 
@@ -316,6 +328,7 @@ pub const Editor = struct {
     }
 
     pub fn deleteBackward(self: *Editor) !void {
+        if (self.hasMultipleCursors()) return self.multiCursorDeleteBackward();
         if (self.selection.active) {
             try self.deleteSelection();
             return;
@@ -944,21 +957,25 @@ pub const Editor = struct {
     // ── Movement ───────────────────────────────────────────────
 
     pub fn moveLeft(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         self.moveCursorLeft();
     }
 
     pub fn moveRight(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         self.moveCursorRight();
     }
 
     pub fn moveUp(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         self.moveCursorUp();
     }
 
     pub fn moveDown(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         self.moveCursorDown();
     }
@@ -991,6 +1008,7 @@ pub const Editor = struct {
     }
 
     pub fn goToLine(self: *Editor, target_line: u32) void {
+        self.clearExtraCursors();
         const max_line = self.buffer.lineCount() -| 1;
         const line = @min(target_line, max_line);
         self.selection.clear();
@@ -1120,6 +1138,224 @@ pub const Editor = struct {
         try self.insertTextLiteral(text);
     }
 
+    // ── Multi-Cursor ─────────────────────────────────────────
+
+    pub fn hasMultipleCursors(self: *const Editor) bool {
+        return self.extra_cursors.items.len > 0;
+    }
+
+    pub fn clearExtraCursors(self: *Editor) void {
+        self.extra_cursors.clearRetainingCapacity();
+        if (self.multi_cursor_word) |w| {
+            self.allocator.free(w);
+            self.multi_cursor_word = null;
+        }
+    }
+
+    pub fn selectNextOccurrence(self: *Editor) !void {
+        // First invocation: select the word under cursor
+        if (self.multi_cursor_word == null) {
+            if (!self.selection.active) {
+                self.selectWordAt(self.cursor.line, self.cursor.col);
+            }
+            if (!self.selection.active) return;
+            const text = self.getSelectionText() orelse return;
+            self.multi_cursor_word = text; // takes ownership
+            return;
+        }
+
+        const word = self.multi_cursor_word orelse return;
+        if (word.len == 0) return;
+
+        // Find the next occurrence after the last cursor
+        const content = self.buffer.getContent(self.allocator) catch return;
+        defer self.allocator.free(content);
+
+        // Find the furthest cursor position
+        var max_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
+        for (self.extra_cursors.items) |ec| {
+            const p = self.buffer.lineColToPos(ec.cursor.line, ec.cursor.col);
+            if (p > max_pos) max_pos = p;
+        }
+
+        const total: u32 = @intCast(content.len);
+        const wlen: u32 = @intCast(word.len);
+        var search_pos = max_pos;
+        var checked: u32 = 0;
+
+        while (checked < total) {
+            if (search_pos + wlen > total) search_pos = 0;
+
+            if (std.mem.eql(u8, content[search_pos..][0..wlen], word)) {
+                // Check not already covered by an existing cursor
+                var already_exists = false;
+                const match_start = self.buffer.posToLineCol(search_pos);
+                const match_end = self.buffer.posToLineCol(search_pos + wlen);
+
+                // Check primary
+                if (self.selection.active) {
+                    const r = self.selection.orderedRange(self.cursor.line, self.cursor.col);
+                    if (r.start_line == match_start.line and r.start_col == match_start.col) already_exists = true;
+                }
+                // Check extras
+                for (self.extra_cursors.items) |ec| {
+                    if (ec.selection.active) {
+                        const r = ec.selection.orderedRange(ec.cursor.line, ec.cursor.col);
+                        if (r.start_line == match_start.line and r.start_col == match_start.col) already_exists = true;
+                    }
+                }
+
+                if (!already_exists) {
+                    // Push current primary to extras
+                    try self.extra_cursors.append(self.allocator, .{
+                        .cursor = self.cursor,
+                        .selection = self.selection,
+                    });
+                    // Set primary to new match
+                    self.selection.setAnchor(match_start.line, match_start.col);
+                    self.cursor.moveTo(match_end.line, match_end.col);
+                    self.ensureCursorVisible();
+                    return;
+                }
+            }
+
+            search_pos += 1;
+            checked += 1;
+        }
+    }
+
+    pub fn multiCursorInsert(self: *Editor, text: []const u8) !void {
+        const CursorPos = struct { idx: u32, pos: u32 };
+        const count = 1 + @as(u32, @intCast(self.extra_cursors.items.len));
+        const positions = try self.allocator.alloc(CursorPos, count);
+        defer self.allocator.free(positions);
+
+        positions[0] = .{ .idx = 0, .pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col) };
+        for (self.extra_cursors.items, 0..) |ec, i| {
+            positions[i + 1] = .{ .idx = @intCast(i + 1), .pos = self.buffer.lineColToPos(ec.cursor.line, ec.cursor.col) };
+        }
+
+        // Sort descending by position (process highest first)
+        std.mem.sort(CursorPos, positions, {}, struct {
+            fn cmp(_: void, a: CursorPos, b: CursorPos) bool {
+                return a.pos > b.pos;
+            }
+        }.cmp);
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+
+        for (positions) |p| {
+            // Delete selection if active
+            if (p.idx == 0) {
+                if (self.selection.active) try self.deleteSelectionNoCommit();
+            } else {
+                const ec = &self.extra_cursors.items[p.idx - 1];
+                if (ec.selection.active) {
+                    // Swap into primary, delete, swap back
+                    const saved = CursorState{ .cursor = self.cursor, .selection = self.selection };
+                    self.cursor = ec.cursor;
+                    self.selection = ec.selection;
+                    try self.deleteSelectionNoCommit();
+                    ec.cursor = self.cursor;
+                    ec.selection = self.selection;
+                    self.cursor = saved.cursor;
+                    self.selection = saved.selection;
+                }
+            }
+
+            // Insert text at this cursor
+            const cur = if (p.idx == 0) &self.cursor else &self.extra_cursors.items[p.idx - 1].cursor;
+            const pos = self.buffer.lineColToPos(cur.line, cur.col);
+            try self.undo_stack.record(.insert, pos, text);
+            try self.buffer.insert(pos, text);
+            self.invalidateCaches();
+
+            // Advance cursor
+            for (text) |ch| {
+                if (ch == '\n') {
+                    cur.line += 1;
+                    cur.col = 0;
+                } else {
+                    cur.col += 1;
+                }
+            }
+            cur.target_col = cur.col;
+
+            // Clear selection
+            if (p.idx == 0) {
+                self.selection.clear();
+            } else {
+                self.extra_cursors.items[p.idx - 1].selection.clear();
+            }
+        }
+
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
+        self.invalidateCaches();
+        self.ensureCursorVisible();
+    }
+
+    pub fn multiCursorDeleteBackward(self: *Editor) !void {
+        const CursorPos = struct { idx: u32, pos: u32 };
+        const count = 1 + @as(u32, @intCast(self.extra_cursors.items.len));
+        const positions = try self.allocator.alloc(CursorPos, count);
+        defer self.allocator.free(positions);
+
+        positions[0] = .{ .idx = 0, .pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col) };
+        for (self.extra_cursors.items, 0..) |ec, i| {
+            positions[i + 1] = .{ .idx = @intCast(i + 1), .pos = self.buffer.lineColToPos(ec.cursor.line, ec.cursor.col) };
+        }
+
+        std.mem.sort(CursorPos, positions, {}, struct {
+            fn cmp(_: void, a: CursorPos, b: CursorPos) bool {
+                return a.pos > b.pos;
+            }
+        }.cmp);
+
+        self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+
+        for (positions) |p| {
+            const cur = if (p.idx == 0) &self.cursor else &self.extra_cursors.items[p.idx - 1].cursor;
+            const sel = if (p.idx == 0) &self.selection else &self.extra_cursors.items[p.idx - 1].selection;
+            const pos = self.buffer.lineColToPos(cur.line, cur.col);
+
+            if (sel.active) {
+                const saved = CursorState{ .cursor = self.cursor, .selection = self.selection };
+                self.cursor = cur.*;
+                self.selection = sel.*;
+                try self.deleteSelectionNoCommit();
+                cur.* = self.cursor;
+                sel.* = self.selection;
+                self.cursor = saved.cursor;
+                self.selection = saved.selection;
+                continue;
+            }
+
+            if (pos == 0) continue;
+
+            // Delete one unit backward (ASCII fast path)
+            const prev_byte = self.buffer.byteAt(pos - 1) orelse continue;
+            const del_len: u32 = if (prev_byte < 0x80) 1 else blk: {
+                const pp = self.buffer.prevCodepointStart(pos);
+                break :blk pos - pp;
+            };
+            const del_start = pos - del_len;
+            const del_bytes = try self.buffer.getRange(self.allocator, del_start, pos);
+            defer self.allocator.free(del_bytes);
+            try self.undo_stack.record(.delete, del_start, del_bytes);
+            try self.buffer.delete(del_start, del_len);
+            self.invalidateCaches();
+
+            const lc = self.buffer.posToLineCol(del_start);
+            cur.moveTo(lc.line, lc.col);
+        }
+
+        const branched = try self.undo_stack.commit();
+        self.markDirty(branched);
+        self.invalidateCaches();
+        self.ensureCursorVisible();
+    }
+
     // ── Word Completion ───────────────────────────────────────
 
     /// Returns newline-separated list of buffer words matching the prefix at cursor.
@@ -1199,6 +1435,7 @@ pub const Editor = struct {
     // ── Undo/Redo ──────────────────────────────────────────────
 
     pub fn undo(self: *Editor) !void {
+        self.clearExtraCursors();
         const group = self.undo_stack.popUndo() orelse return;
 
         // Apply inverse operations in reverse order
@@ -1223,6 +1460,7 @@ pub const Editor = struct {
     }
 
     pub fn redo(self: *Editor) !void {
+        self.clearExtraCursors();
         const group = self.undo_stack.popRedo() orelse return;
 
         // Re-apply operations in forward order
@@ -1319,6 +1557,7 @@ pub const Editor = struct {
     }
 
     pub fn click(self: *Editor, x: f32, y: f32, extend: bool) void {
+        self.clearExtraCursors();
         const gutter_width = self.gutterWidth();
         const text_x = @max(0, x - gutter_width);
 

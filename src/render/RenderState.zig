@@ -546,6 +546,46 @@ pub const RenderState = struct {
             .style = 1, // beam
         }) catch {};
 
+        // Extra cursors and their selections
+        for (editor.extra_cursors.items) |ec| {
+            const ec_metrics = editor.byteColToPixelMetrics(ec.cursor.line, ec.cursor.col);
+            const ec_base_vrow = if (wrap_enabled) editor.lineToVisualRow(ec.cursor.line) else ec.cursor.line;
+            const ec_x = (if (wrap_enabled) ec_metrics.segment_x else ec_metrics.total_x) + gutter_w -
+                if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
+            const ec_y = @as(f32, @floatFromInt(ec_base_vrow + ec_metrics.segment)) * cell_h - editor.scroll_y;
+
+            self.cursors.append(self.allocator, .{
+                .x = ec_x, .y = ec_y, .w = 2, .h = cell_h,
+                .color = config.cursor_color, .style = 1,
+            }) catch {};
+
+            // Render selection for this extra cursor
+            if (ec.selection.active) {
+                const r = ec.selection.orderedRange(ec.cursor.line, ec.cursor.col);
+                var sl = r.start_line;
+                while (sl <= r.end_line and sl < line_count) : (sl += 1) {
+                    const ls = editor.buffer.lineStart(sl);
+                    const le = editor.buffer.lineEnd(sl);
+                    const s_col: u32 = if (sl == r.start_line) r.start_col else 0;
+                    const e_col: u32 = if (sl == r.end_line) r.end_col else le - ls;
+                    const s_met = editor.byteColToPixelMetrics(sl, s_col);
+                    const e_met = editor.byteColToPixelMetrics(sl, e_col);
+                    const s_vrow = if (wrap_enabled) editor.lineToVisualRow(sl) else sl;
+                    const sx = (if (wrap_enabled) s_met.segment_x else s_met.total_x) + gutter_w -
+                        if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
+                    const ex = (if (wrap_enabled) e_met.segment_x else e_met.total_x) + gutter_w -
+                        if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
+                    const sy = @as(f32, @floatFromInt(s_vrow + s_met.segment)) * cell_h - editor.scroll_y;
+                    if (sy + cell_h >= 0 and sy <= vp_h and ex > sx) {
+                        self.selections.append(self.allocator, .{
+                            .x = sx, .y = sy, .w = ex - sx, .h = cell_h,
+                            .color = config.selection_color,
+                        }) catch {};
+                    }
+                }
+            }
+        }
+
         // Bracket matching highlights (cached — only recompute when cursor moves or buffer changes)
         if (self.bracket_cache_dirty or
             self.cached_bracket_cursor_line != editor.cursor.line or

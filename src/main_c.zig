@@ -426,6 +426,22 @@ export fn matcha_free_string(str: ?[*:0]u8) void {
     }
 }
 
+// ── Multi-Cursor ────────────────────────────────────────────
+
+export fn matcha_editor_select_next_occurrence(ed: ?*Editor) void {
+    const e = ed orelse return;
+    e.selectNextOccurrence() catch |err| e.setLastError(err);
+}
+
+export fn matcha_editor_has_multiple_cursors(ed: ?*Editor) bool {
+    const e = ed orelse return false;
+    return e.hasMultipleCursors();
+}
+
+export fn matcha_editor_clear_extra_cursors(ed: ?*Editor) void {
+    if (ed) |e| e.clearExtraCursors();
+}
+
 // ── Word Completion ─────────────────────────────────────────
 
 export fn matcha_editor_get_completions(ed: ?*Editor, prefix_len: ?*u32) ?[*:0]u8 {

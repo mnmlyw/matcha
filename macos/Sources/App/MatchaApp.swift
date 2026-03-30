@@ -60,10 +60,15 @@ struct MatchaApp: App {
                 }
                 .keyboardShortcut("/", modifiers: .command)
 
+                Button("Select Next Occurrence") {
+                    MatchaEditor.activeEditor?.selectNextOccurrence()
+                }
+                .keyboardShortcut("d", modifiers: .command)
+
                 Button("Duplicate Line") {
                     MatchaEditor.activeEditor?.duplicateLine()
                 }
-                .keyboardShortcut("d", modifiers: .command)
+                .keyboardShortcut("d", modifiers: [.command, .shift])
 
                 Divider()
 
