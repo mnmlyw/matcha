@@ -131,6 +131,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         matcha_init()
+
+        // Check for updates (respects auto-update config, max once per day)
+        let config = MatchaConfig()
+        UpdateChecker.shared.checkIfNeeded(config: config)
     }
 
     @objc func handleOpenDocuments(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {

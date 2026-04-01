@@ -121,7 +121,7 @@ pub fn build(b: *std.Build) void {
             \\    <key>CFBundlePackageType</key>
             \\    <string>APPL</string>
             \\    <key>CFBundleShortVersionString</key>
-            \\    <string>0.1.0</string>
+            \\    <string>0.5.0</string>
             \\    <key>CFBundleVersion</key>
             \\    <string>1</string>
             \\    <key>LSMinimumSystemVersion</key>
@@ -225,6 +225,7 @@ pub fn build(b: *std.Build) void {
             \\  -o "$APP/Matcha" \
             \\  macos/Sources/App/MatchaApp.swift \
             \\  macos/Sources/App/TabManager.swift \
+            \\  macos/Sources/App/UpdateChecker.swift \
             \\  macos/Sources/Bridge/MatchaEditor.swift \
             \\  macos/Sources/Bridge/MatchaConfig.swift \
             \\  macos/Sources/Views/ContentView.swift \

@@ -48,6 +48,8 @@ fn applyKeyValue(allocator: Allocator, config: *Config, key: []const u8, value: 
         config.line_numbers = std.mem.eql(u8, value, "true");
     } else if (std.mem.eql(u8, key, "wrap-lines")) {
         config.wrap_lines = std.mem.eql(u8, value, "true");
+    } else if (std.mem.eql(u8, key, "auto-update")) {
+        config.auto_update = std.mem.eql(u8, value, "true");
     } else if (std.mem.eql(u8, key, "appearance")) {
         if (std.mem.eql(u8, value, "dark")) {
             config.appearance = .dark;

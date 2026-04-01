@@ -12,6 +12,7 @@ pub const Config = struct {
     insert_spaces: bool = true,
     line_numbers: bool = true,
     wrap_lines: bool = true,
+    auto_update: bool = true,
 
     // Appearance: "light", "dark", or "auto" (follows system)
     appearance: Appearance = .auto,

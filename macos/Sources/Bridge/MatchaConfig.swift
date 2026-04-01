@@ -45,4 +45,9 @@ class MatchaConfig: ObservableObject {
         guard let h = handle else { return true }
         return matcha_config_get_bool(h, "line-numbers")
     }
+
+    var autoUpdate: Bool {
+        guard let h = handle else { return true }
+        return matcha_config_get_bool(h, "auto-update")
+    }
 }

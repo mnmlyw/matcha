@@ -65,6 +65,7 @@ export fn matcha_config_get_bool(cfg: ?*Config, key: ?[*:0]const u8) bool {
 
     if (std.mem.eql(u8, slice, "insert-spaces")) return c.insert_spaces;
     if (std.mem.eql(u8, slice, "line-numbers")) return c.line_numbers;
+    if (std.mem.eql(u8, slice, "auto-update")) return c.auto_update;
     return false;
 }
 
