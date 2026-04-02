@@ -59,49 +59,48 @@ fn applyKeyValue(allocator: Allocator, config: *Config, key: []const u8, value: 
             config.appearance = .auto;
         }
     } else if (std.mem.eql(u8, key, "bg-color")) {
-        config.bg_color = parseColor(value);
+        if (parseColor(value)) |c| config.bg_color = c;
     } else if (std.mem.eql(u8, key, "fg-color")) {
-        config.fg_color = parseColor(value);
+        if (parseColor(value)) |c| config.fg_color = c;
     } else if (std.mem.eql(u8, key, "cursor-color")) {
-        config.cursor_color = parseColor(value);
+        if (parseColor(value)) |c| config.cursor_color = c;
     } else if (std.mem.eql(u8, key, "selection-color")) {
-        config.selection_color = parseColor(value);
+        if (parseColor(value)) |c| config.selection_color = c;
     } else if (std.mem.eql(u8, key, "theme-normal-color")) {
-        config.theme.normal = parseColor(value);
+        if (parseColor(value)) |c| config.theme.normal = c;
     } else if (std.mem.eql(u8, key, "theme-keyword-color")) {
-        config.theme.keyword = parseColor(value);
+        if (parseColor(value)) |c| config.theme.keyword = c;
     } else if (std.mem.eql(u8, key, "theme-string-color")) {
-        config.theme.string = parseColor(value);
+        if (parseColor(value)) |c| config.theme.string = c;
     } else if (std.mem.eql(u8, key, "theme-comment-color")) {
-        config.theme.comment = parseColor(value);
+        if (parseColor(value)) |c| config.theme.comment = c;
     } else if (std.mem.eql(u8, key, "theme-number-color")) {
-        config.theme.number = parseColor(value);
+        if (parseColor(value)) |c| config.theme.number = c;
     } else if (std.mem.eql(u8, key, "theme-type-color")) {
-        config.theme.typ = parseColor(value);
+        if (parseColor(value)) |c| config.theme.typ = c;
     } else if (std.mem.eql(u8, key, "theme-function-color")) {
-        config.theme.function = parseColor(value);
+        if (parseColor(value)) |c| config.theme.function = c;
     } else if (std.mem.eql(u8, key, "theme-operator-color")) {
-        config.theme.operator = parseColor(value);
+        if (parseColor(value)) |c| config.theme.operator = c;
     } else if (std.mem.eql(u8, key, "theme-punctuation-color")) {
-        config.theme.punctuation = parseColor(value);
+        if (parseColor(value)) |c| config.theme.punctuation = c;
     } else if (std.mem.eql(u8, key, "theme-attribute-color")) {
-        config.theme.attribute = parseColor(value);
+        if (parseColor(value)) |c| config.theme.attribute = c;
     }
     // Unknown keys are silently ignored
 }
 
-fn parseColor(value: []const u8) u32 {
+fn parseColor(value: []const u8) ?u32 {
     var hex = value;
     if (hex.len > 0 and hex[0] == '#') hex = hex[1..];
     if (hex.len == 6) {
-        // Add FF alpha
-        const rgb = std.fmt.parseInt(u32, hex, 16) catch return 0;
+        const rgb = std.fmt.parseInt(u32, hex, 16) catch return null;
         return (rgb << 8) | 0xFF;
     }
     if (hex.len == 8) {
-        return std.fmt.parseInt(u32, hex, 16) catch 0;
+        return std.fmt.parseInt(u32, hex, 16) catch null;
     }
-    return 0;
+    return null;
 }
 
 // ── Tests ──────────────────────────────────────────────────────

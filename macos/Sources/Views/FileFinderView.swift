@@ -17,8 +17,7 @@ struct FileFinderView: View {
     private var filteredFiles: [String] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmed.isEmpty else { return Array(allFiles.prefix(100)) }
-        return allFiles.filter { fuzzyMatch(query: trimmed, target: $0.lowercased()) }
-            .prefix(50)
+        let sorted = allFiles.filter { fuzzyMatch(query: trimmed, target: $0.lowercased()) }
             .sorted { a, b in
                 // Prefer shorter paths and basename matches
                 let aName = (a as NSString).lastPathComponent.lowercased()
@@ -28,6 +27,7 @@ struct FileFinderView: View {
                 if aExact != bExact { return aExact }
                 return a.count < b.count
             }
+        return Array(sorted.prefix(50))
     }
 
     var body: some View {

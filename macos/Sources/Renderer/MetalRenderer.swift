@@ -15,6 +15,7 @@ class MetalRenderer {
     var glyphAtlasTexture: MTLTexture?
     var emojiAtlasTexture: MTLTexture?
     var glyphCache: [UInt32: GlyphUV] = [:]
+    var clusterGlyphCache: [String: GlyphUV] = [:]
     let ctFont: CTFont
     let cellWidth: Float
     let cellHeight: Float
@@ -473,7 +474,8 @@ class MetalRenderer {
     private static let clusterSentinel: UInt32 = 0x110000
 
     private func ensureGlyph(codepoint: UInt32, clusterData: UnsafeBufferPointer<UInt8> = .init(start: nil, count: 0)) -> GlyphUV {
-        if let cached = glyphCache[codepoint] {
+        // Skip glyphCache for cluster codepoints — offsets are unstable across frames
+        if codepoint < Self.clusterSentinel, let cached = glyphCache[codepoint] {
             return cached
         }
 
@@ -483,7 +485,6 @@ class MetalRenderer {
             guard offset < clusterData.count else {
                 let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                                   bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
-                glyphCache[codepoint] = uv
                 return uv
             }
             // Read null-terminated UTF-8 string
@@ -491,7 +492,13 @@ class MetalRenderer {
             while offset + len < clusterData.count && clusterData[offset + len] != 0 { len += 1 }
             let bytes = Array(clusterData[offset..<offset + len])
             let str = String(bytes: bytes, encoding: .utf8) ?? "\u{FFFD}"
-            return rasterizeClusterGlyph(key: codepoint, string: str)
+            // Cache by string content, not offset (offsets are unstable across frames)
+            if let cached = clusterGlyphCache[str] {
+                return cached
+            }
+            let uv = rasterizeClusterGlyph(key: codepoint, string: str)
+            clusterGlyphCache[str] = uv
+            return uv
         }
 
         // Single codepoint path
@@ -557,10 +564,8 @@ class MetalRenderer {
         let glyphH = Int(ceil(bounds.height) + padding * 2)
 
         if glyphW <= 0 || glyphH <= 0 {
-            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
-                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
-            glyphCache[key] = uv
-            return uv
+            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
         }
 
         // Always use color atlas for clusters (emoji)
@@ -570,10 +575,8 @@ class MetalRenderer {
             emojiRowHeight = 0
         }
         if emojiCursorY + glyphH > emojiAtlasHeight {
-            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
-                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
-            glyphCache[key] = uv
-            return uv
+            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
         }
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -581,10 +584,8 @@ class MetalRenderer {
                                   bitsPerComponent: 8, bytesPerRow: glyphW * 4,
                                   space: colorSpace,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else {
-            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
-                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
-            glyphCache[key] = uv
-            return uv
+            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
         }
 
         ctx.clear(CGRect(x: 0, y: 0, width: glyphW, height: glyphH))
@@ -623,7 +624,6 @@ class MetalRenderer {
             isColor: true
         )
 
-        glyphCache[key] = uv
         emojiCursorX += glyphW + 1
         emojiRowHeight = max(emojiRowHeight, glyphH)
         emojiAtlasDirty = true

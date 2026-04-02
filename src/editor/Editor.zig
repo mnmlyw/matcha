@@ -145,6 +145,7 @@ pub const Editor = struct {
         self.buffer = PieceTable.init(self.allocator);
         self.cursor = .{};
         self.selection = .{};
+        self.clearExtraCursors();
         self.undo_stack.deinit();
         self.undo_stack = UndoStack.init(self.allocator);
         self.modified = false;
@@ -186,6 +187,7 @@ pub const Editor = struct {
         self.buffer = new_buffer;
         self.cursor = .{};
         self.selection = .{};
+        self.clearExtraCursors();
         self.undo_stack.deinit();
         self.undo_stack = UndoStack.init(self.allocator);
         self.modified = false;
@@ -396,6 +398,7 @@ pub const Editor = struct {
     }
 
     pub fn deleteForward(self: *Editor) !void {
+        self.clearExtraCursors();
         if (self.selection.active) {
             try self.deleteSelection();
             return;
@@ -434,6 +437,7 @@ pub const Editor = struct {
     }
 
     pub fn deleteWordBackward(self: *Editor) !void {
+        self.clearExtraCursors();
         if (self.selection.active) {
             try self.deleteSelection();
             return;
@@ -459,6 +463,7 @@ pub const Editor = struct {
     }
 
     pub fn deleteWordForward(self: *Editor) !void {
+        self.clearExtraCursors();
         if (self.selection.active) {
             try self.deleteSelection();
             return;
@@ -981,12 +986,14 @@ pub const Editor = struct {
     }
 
     pub fn moveLineStart(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         self.cursor.moveTo(self.cursor.line, 0);
         self.ensureCursorVisible();
     }
 
     pub fn moveLineEnd(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         const line_len = self.buffer.lineEnd(self.cursor.line) - self.buffer.lineStart(self.cursor.line);
         self.cursor.moveTo(self.cursor.line, line_len);
@@ -994,12 +1001,14 @@ pub const Editor = struct {
     }
 
     pub fn moveStart(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         self.cursor.moveTo(0, 0);
         self.ensureCursorVisible();
     }
 
     pub fn moveEnd(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         const last_line = self.buffer.lineCount() -| 1;
         const line_len = self.buffer.lineEnd(last_line) - self.buffer.lineStart(last_line);
@@ -1017,6 +1026,7 @@ pub const Editor = struct {
     }
 
     pub fn movePageUp(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         const page_lines = self.visibleLines();
         if (self.cursor.line >= page_lines) {
@@ -1029,6 +1039,7 @@ pub const Editor = struct {
     }
 
     pub fn movePageDown(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         const page_lines = self.visibleLines();
         const max_line = self.buffer.lineCount() -| 1;
@@ -1039,11 +1050,13 @@ pub const Editor = struct {
     }
 
     pub fn moveWordLeft(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         self.moveCursorWordLeft();
     }
 
     pub fn moveWordRight(self: *Editor) void {
+        self.clearExtraCursors();
         self.selection.clear();
         self.moveCursorWordRight();
     }
@@ -1333,11 +1346,26 @@ pub const Editor = struct {
 
             if (pos == 0) continue;
 
-            // Delete one unit backward (ASCII fast path)
+            // Delete one unit backward (ASCII fast path, grapheme cluster for non-ASCII)
             const prev_byte = self.buffer.byteAt(pos - 1) orelse continue;
             const del_len: u32 = if (prev_byte < 0x80) 1 else blk: {
-                const pp = self.buffer.prevCodepointStart(pos);
-                break :blk pos - pp;
+                const line_lc = self.buffer.posToLineCol(pos);
+                const line_start = self.buffer.lineStart(line_lc.line);
+                if (self.buffer.getRange(self.allocator, line_start, pos)) |line_data| {
+                    defer self.allocator.free(line_data);
+                    var scan: u32 = 0;
+                    var last_start: u32 = 0;
+                    while (scan < line_data.len) {
+                        last_start = scan;
+                        const cl = nextClusterLen(line_data, scan);
+                        if (cl == 0) break;
+                        scan += cl;
+                    }
+                    break :blk pos - (line_start + last_start);
+                } else |_| {
+                    const pp = self.buffer.prevCodepointStart(pos);
+                    break :blk pos - pp;
+                }
             };
             const del_start = pos - del_len;
             const del_bytes = try self.buffer.getRange(self.allocator, del_start, pos);
