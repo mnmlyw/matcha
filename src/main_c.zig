@@ -65,6 +65,7 @@ export fn matcha_config_get_bool(cfg: ?*Config, key: ?[*:0]const u8) bool {
 
     if (std.mem.eql(u8, slice, "insert-spaces")) return c.insert_spaces;
     if (std.mem.eql(u8, slice, "line-numbers")) return c.line_numbers;
+    if (std.mem.eql(u8, slice, "wrap-lines")) return c.wrap_lines;
     if (std.mem.eql(u8, slice, "auto-update")) return c.auto_update;
     return false;
 }
@@ -84,6 +85,9 @@ export fn matcha_config_get_color(cfg: ?*Config, key: ?[*:0]const u8) u32 {
     const slice = std.mem.span(k);
 
     if (std.mem.eql(u8, slice, "bg-color")) return c.bg_color;
+    if (std.mem.eql(u8, slice, "fg-color")) return c.fg_color;
+    if (std.mem.eql(u8, slice, "cursor-color")) return c.cursor_color;
+    if (std.mem.eql(u8, slice, "selection-color")) return c.selection_color;
     if (std.mem.eql(u8, slice, "chrome-bg-color")) return c.chrome_bg_color;
     if (std.mem.eql(u8, slice, "chrome-active-bg-color")) return c.chrome_active_bg_color;
     if (std.mem.eql(u8, slice, "chrome-fg-color")) return c.chrome_fg_color;

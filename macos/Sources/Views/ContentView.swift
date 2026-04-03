@@ -277,7 +277,11 @@ struct ContentView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .matchaNewFile)) { _ in
                 guard isKeyWindow else { return }
-                editor?.newFile()
+                if let ed = editor, !ed.info.modified, ed.info.filename == nil {
+                    ed.newFile()
+                } else {
+                    tabManager.newTab()
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .matchaOpenFile)) { _ in
                 guard isKeyWindow else { return }
@@ -373,6 +377,7 @@ struct ContentView: View {
         if !AppDelegate.pendingFilePaths.isEmpty {
             let paths = AppDelegate.pendingFilePaths
             AppDelegate.pendingFilePaths = []
+            Self.didHandleLaunchFile = true
             tabManager.openInCurrentTab(path: paths[0])
             for path in paths.dropFirst() {
                 tabManager.openInNewTab(path: path)

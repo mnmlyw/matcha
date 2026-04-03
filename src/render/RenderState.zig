@@ -235,6 +235,20 @@ pub const RenderState = struct {
             cursor_base_vrow = editor.cursor.line;
         }
 
+        // Current line highlight (only when no selection active, to avoid painting over it)
+        if (!sel_active) {
+            const hl_y = @as(f32, @floatFromInt(cursor_base_vrow)) * cell_h - editor.scroll_y;
+            if (hl_y + cell_h >= 0 and hl_y <= vp_h) {
+                self.selections.append(self.allocator, .{
+                    .x = gutter_w,
+                    .y = hl_y,
+                    .w = vp_w - gutter_w,
+                    .h = cell_h,
+                    .color = config.current_line_color,
+                }) catch {};
+            }
+        }
+
         // Generate cells for each visible line
         var current_vrow = scan_vrow;
         var line: u32 = first_line;
@@ -424,9 +438,9 @@ pub const RenderState = struct {
                     trail_end -= 1;
                 }
                 if (trail_end > 0 and trail_end < content_len) {
-                    const trail_metrics = editor.byteColToPixelMetrics(line, trail_end);
+                    const trail_metrics = editor.byteColToPixelMetricsWithData(line_data, trail_end);
                     var trail_pos = trail_end;
-                    var trail_vcol = editor.byteColToVisualCol(line, trail_end);
+                    var trail_vcol = editor.byteColToVisualColWithData(line_data, trail_end);
                     var trail_seg = trail_metrics.segment;
                     var trail_seg_x = trail_metrics.segment_x;
                     var rect_start_seg = trail_seg;
@@ -517,22 +531,9 @@ pub const RenderState = struct {
         editor.max_visible_line_len = max_line_len;
         editor.max_visible_line_width = max_line_width;
 
-        // Current line highlight
-        {
-            const hl_y = @as(f32, @floatFromInt(cursor_base_vrow)) * cell_h - editor.scroll_y;
-            if (hl_y + cell_h >= 0 and hl_y <= vp_h) {
-                self.selections.append(self.allocator, .{
-                    .x = gutter_w,
-                    .y = hl_y,
-                    .w = vp_w - gutter_w,
-                    .h = cell_h,
-                    .color = config.current_line_color,
-                }) catch {};
-            }
-        }
-
-        // Cursor
-        const cursor_metrics = editor.byteColToPixelMetrics(editor.cursor.line, editor.cursor.col);
+        // Cursor (use scratch buffer to avoid allocation)
+        const cursor_line_data = self.lineBytes(editor, editor.cursor.line) catch &[0]u8{};
+        const cursor_metrics = editor.byteColToPixelMetricsWithData(cursor_line_data, editor.cursor.col);
         const cursor_x = (if (wrap_enabled) cursor_metrics.segment_x else cursor_metrics.total_x) + gutter_w -
             if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
         const cursor_y = @as(f32, @floatFromInt(cursor_base_vrow + cursor_metrics.segment)) * cell_h - editor.scroll_y;
@@ -548,7 +549,8 @@ pub const RenderState = struct {
 
         // Extra cursors and their selections
         for (editor.extra_cursors.items) |ec| {
-            const ec_metrics = editor.byteColToPixelMetrics(ec.cursor.line, ec.cursor.col);
+            const ec_line_data = self.lineBytes(editor, ec.cursor.line) catch &[0]u8{};
+            const ec_metrics = editor.byteColToPixelMetricsWithData(ec_line_data, ec.cursor.col);
             const ec_base_vrow = if (wrap_enabled) editor.lineToVisualRow(ec.cursor.line) else ec.cursor.line;
             const ec_x = (if (wrap_enabled) ec_metrics.segment_x else ec_metrics.total_x) + gutter_w -
                 if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
@@ -568,8 +570,9 @@ pub const RenderState = struct {
                     const le = editor.buffer.lineEnd(sl);
                     const s_col: u32 = if (sl == r.start_line) r.start_col else 0;
                     const e_col: u32 = if (sl == r.end_line) r.end_col else le - ls;
-                    const s_met = editor.byteColToPixelMetrics(sl, s_col);
-                    const e_met = editor.byteColToPixelMetrics(sl, e_col);
+                    const sel_line_data = self.lineBytes(editor, sl) catch &[0]u8{};
+                    const s_met = editor.byteColToPixelMetricsWithData(sel_line_data, s_col);
+                    const e_met = editor.byteColToPixelMetricsWithData(sel_line_data, e_col);
                     const s_vrow = if (wrap_enabled) editor.lineToVisualRow(sl) else sl;
                     const sx = (if (wrap_enabled) s_met.segment_x else s_met.total_x) + gutter_w -
                         if (!wrap_enabled) editor.scroll_x else @as(f32, 0);
@@ -599,7 +602,8 @@ pub const RenderState = struct {
         if (self.cached_bracket_match) |match| {
             const bracket_color: u32 = 0x585B7080; // subtle highlight
             // Highlight the matching bracket
-            const match_metrics = editor.byteColToPixelMetrics(match.line, match.col);
+            const match_line_data = self.lineBytes(editor, match.line) catch &[0]u8{};
+            const match_metrics = editor.byteColToPixelMetricsWithData(match_line_data, match.col);
             const m_base_vrow = if (wrap_enabled) editor.lineToVisualRow(match.line) else match.line;
             const mx = (if (wrap_enabled) match_metrics.segment_x else match_metrics.total_x) + gutter_w -
                 if (!wrap_enabled) editor.scroll_x else @as(f32, 0);

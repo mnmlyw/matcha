@@ -25,16 +25,17 @@ final class UpdateChecker {
     }
 
     private func check() async {
-        UserDefaults.standard.set(Date(), forKey: lastCheckKey)
-
         guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return }
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 15
 
         guard let (data, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse,
-              http.statusCode == 200 else { return }
+              let http = response as? HTTPURLResponse else { return }
+
+        // Throttle after any completed request (retries on network failure)
+        UserDefaults.standard.set(Date(), forKey: lastCheckKey)
+        guard http.statusCode == 200 else { return }
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tagName = json["tag_name"] as? String,

@@ -2044,12 +2044,18 @@ pub const Editor = struct {
     pub fn byteColToPixelMetrics(self: *const Editor, line: u32, byte_col: u32) PixelMetrics {
         const line_start = self.buffer.lineStart(line);
         const line_end = self.buffer.lineEnd(line);
-        const line_len = line_end - line_start;
-        const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
 
         const data = self.buffer.getRange(self.allocator, line_start, line_end) catch
             return .{ .segment = 0, .segment_x = 0, .total_x = 0 };
         defer self.allocator.free(data);
+
+        return self.byteColToPixelMetricsWithData(data, byte_col);
+    }
+
+    /// Same as byteColToPixelMetrics but takes pre-fetched line data, avoiding allocation.
+    pub fn byteColToPixelMetricsWithData(self: *const Editor, data: []const u8, byte_col: u32) PixelMetrics {
+        const line_len: u32 = @intCast(data.len);
+        const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
 
         // Pass 1: find wrap break points (cluster-aware)
         var break_positions: [4096]u32 = undefined;
@@ -2201,10 +2207,14 @@ pub const Editor = struct {
     pub fn byteColToVisualCol(self: *const Editor, line: u32, byte_col: u32) u32 {
         const line_start = self.buffer.lineStart(line);
         const line_end = self.buffer.lineEnd(line);
-        const line_len = line_end - line_start;
         const data = self.buffer.getRange(self.allocator, line_start, line_end) catch return 0;
         defer self.allocator.free(data);
+        return self.byteColToVisualColWithData(data, byte_col);
+    }
 
+    /// Same as byteColToVisualCol but takes pre-fetched line data, avoiding allocation.
+    pub fn byteColToVisualColWithData(self: *const Editor, data: []const u8, byte_col: u32) u32 {
+        const line_len: u32 = @intCast(data.len);
         var pos: u32 = 0;
         var vcol: u32 = 0;
         while (pos < byte_col and pos < line_len) {

@@ -412,55 +412,6 @@ pub const PieceTable = struct {
         }
     }
 
-    /// Get line start/end offsets for lines [first_line, last_line) in a single pass.
-    pub fn getLineOffsets(self: *const PieceTable, first_line: u32, last_line: u32, starts: []u32, ends: []u32) void {
-        const count = last_line - first_line;
-        if (count == 0) return;
-        var current_line: u32 = 0;
-        var offset: u32 = 0;
-        var filled: u32 = 0;
-        // Fill starts for lines in range
-        if (first_line == 0) {
-            starts[0] = 0;
-            filled = 1;
-        }
-        for (self.pieces.items) |p| {
-            if (filled >= count and current_line >= last_line) break;
-            const slice = self.sourceSlice(p);
-            for (slice) |b| {
-                if (b == '\n') {
-                    // This newline ends current_line
-                    if (current_line >= first_line and current_line < last_line) {
-                        ends[current_line - first_line] = offset;
-                    }
-                    current_line += 1;
-                    // Next char starts new line
-                    if (current_line >= first_line and current_line < last_line) {
-                        starts[current_line - first_line] = offset + 1;
-                        filled += 1;
-                    }
-                }
-                offset += 1;
-            }
-        }
-        // Handle last line (no trailing newline)
-        while (filled < count) : (filled += 1) {
-            const idx = first_line + filled;
-            if (idx >= first_line and idx < last_line) {
-                if (starts[idx - first_line] == 0 and idx > 0) {
-                    starts[idx - first_line] = offset;
-                }
-                ends[idx - first_line] = offset;
-            }
-        }
-        // Fill any remaining ends for lines that extend to EOF
-        var i: u32 = 0;
-        while (i < count) : (i += 1) {
-            if (ends[i] == 0 and i + first_line >= current_line) {
-                ends[i] = offset;
-            }
-        }
-    }
 };
 
 // ── Tests ──────────────────────────────────────────────────────

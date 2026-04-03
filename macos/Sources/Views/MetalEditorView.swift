@@ -124,6 +124,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             NotificationCenter.default.removeObserver(observer)
             keyWindowObserver = nil
         }
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
 
         if let window {
             keyWindowObserver = NotificationCenter.default.addObserver(

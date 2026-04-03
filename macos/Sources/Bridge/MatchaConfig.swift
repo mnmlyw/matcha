@@ -15,7 +15,7 @@ class MatchaConfig: ObservableObject {
         matcha_config_load_file(handle, configDir.path)
 
         // Sync appearance=auto with system dark mode
-        let appearance = NSAppearance.currentDrawing()
+        let appearance = NSApp.effectiveAppearance
         let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         matcha_config_set_system_dark(handle, isDark)
     }
