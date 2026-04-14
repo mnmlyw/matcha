@@ -1,6 +1,6 @@
 # Matcha
 
-A lightweight, native macOS text editor built with a Zig core and a SwiftUI + Metal shell.
+A lightweight, native macOS text editor built with a Zig core and a SwiftUI + Metal shell. See [Why Matcha](docs/why-matcha.md) for an architecture overview.
 
 ## Download
 
