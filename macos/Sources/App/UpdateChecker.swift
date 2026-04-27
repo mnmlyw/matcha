@@ -14,6 +14,10 @@ final class UpdateChecker {
     func checkIfNeeded(config: MatchaConfig) {
         guard config.autoUpdate else { return }
 
+        // Skip dev/pre-release builds (SemVer pre-release tag, e.g. "0.0.0-dev").
+        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        if current.contains("-") { return }
+
         if let lastCheck = UserDefaults.standard.object(forKey: lastCheckKey) as? Date,
            Date().timeIntervalSince(lastCheck) < checkInterval {
             return

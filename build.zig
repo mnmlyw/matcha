@@ -103,6 +103,8 @@ pub fn build(b: *std.Build) void {
         app.dependOn(&fail_cmd.step);
     } else if (swiftArchName(target.result.cpu.arch)) |swift_arch| {
         const min_version = formatSemver(b, macosMinVersion(target));
+        const release_version = "0.5.2";
+        const short_version = if (optimize == .Debug) "0.0.0-dev" else release_version;
         const info_plist = b.addWriteFiles().add("Matcha-Info.plist", b.fmt(
             \\<?xml version="1.0" encoding="UTF-8"?>
             \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -121,11 +123,11 @@ pub fn build(b: *std.Build) void {
             \\    <key>CFBundlePackageType</key>
             \\    <string>APPL</string>
             \\    <key>CFBundleShortVersionString</key>
-            \\    <string>0.5.2</string>
+            \\    <string>{[short_version]s}</string>
             \\    <key>CFBundleVersion</key>
             \\    <string>1</string>
             \\    <key>LSMinimumSystemVersion</key>
-            \\    <string>{s}</string>
+            \\    <string>{[min_version]s}</string>
             \\    <key>CFBundleIconFile</key>
             \\    <string>AppIcon</string>
             \\    <key>CFBundleIconName</key>
@@ -171,7 +173,7 @@ pub fn build(b: *std.Build) void {
             \\    </array>
             \\</dict>
             \\</plist>
-        , .{min_version}));
+        , .{ .short_version = short_version, .min_version = min_version }));
         const swift_cmd = b.addSystemCommand(&.{
             "sh", "-c",
             \\set -e
