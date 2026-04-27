@@ -3,13 +3,16 @@ const Allocator = std.mem.Allocator;
 const Config = @import("Config.zig").Config;
 
 pub fn parseFile(allocator: Allocator, config: *Config, path: []const u8) !void {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, .limited(1024 * 1024));
     defer allocator.free(content);
 
     // First pass: find appearance setting

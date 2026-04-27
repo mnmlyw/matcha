@@ -24,15 +24,15 @@ pub const PieceTable = struct {
     cached_line_count: ?u32 = null,
     cached_total_length: ?u32 = null,
     /// Cached byte offsets where each line starts. line_starts[i] = byte offset of line i.
-    line_starts: std.ArrayListUnmanaged(u32) = .{},
+    line_starts: std.ArrayListUnmanaged(u32) = .empty,
 
     pub fn init(allocator: Allocator) PieceTable {
         return .{
             .allocator = allocator,
             .original = &.{},
             .original_owned = false,
-            .add_buffer = .{},
-            .pieces = .{},
+            .add_buffer = .empty,
+            .pieces = .empty,
         };
     }
 
@@ -411,7 +411,6 @@ pub const PieceTable = struct {
             offset = piece_end;
         }
     }
-
 };
 
 // ── Tests ──────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ pub fn tokenizeLine(
     state_in: LineState,
     lang: Language,
 ) !LineTokens {
-    var tokens = std.ArrayListUnmanaged(Token){};
+    var tokens: std.ArrayListUnmanaged(Token) = .empty;
     defer tokens.deinit(allocator);
 
     var state = state_in;
@@ -705,17 +705,17 @@ const shell_keywords = [_][]const u8{
 };
 
 const lua_keywords = [_][]const u8{
-    "and",      "break",    "do",       "else",
-    "elseif",   "end",      "for",      "function",
-    "goto",     "if",       "in",       "local",
-    "not",      "or",       "repeat",   "return",
-    "then",     "until",    "while",
+    "and",    "break", "do",     "else",
+    "elseif", "end",   "for",    "function",
+    "goto",   "if",    "in",     "local",
+    "not",    "or",    "repeat", "return",
+    "then",   "until", "while",
 };
 
 const lua_types = [_][]const u8{
-    "nil",   "true",   "false",
-    "self",  "string", "table",
-    "math",  "io",     "os",
+    "nil",       "true",   "false",
+    "self",      "string", "table",
+    "math",      "io",     "os",
     "coroutine",
 };
 

@@ -33,9 +33,9 @@ pub const UndoStack = struct {
     pub fn init(allocator: Allocator) UndoStack {
         return .{
             .allocator = allocator,
-            .undo_stack = .{},
-            .redo_stack = .{},
-            .current_ops = .{},
+            .undo_stack = .empty,
+            .redo_stack = .empty,
+            .current_ops = .empty,
             .current_cursor_line = 0,
             .current_cursor_col = 0,
         };

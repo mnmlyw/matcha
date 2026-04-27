@@ -15,7 +15,7 @@ const LineNumberList = std.ArrayListUnmanaged(Cell.RenderLineNumber);
 
 const LineStateCache = struct {
     /// Cached line states at interval boundaries
-    states: std.ArrayListUnmanaged(Lexer.LineState) = .{},
+    states: std.ArrayListUnmanaged(Lexer.LineState) = .empty,
     /// Line number of each cached state (state[i] = state entering line interval*i)
     interval: u32 = 64,
     /// Total lines when cache was built
@@ -54,7 +54,7 @@ const LineTokenCacheEntry = struct {
 };
 
 const LineTokenCache = struct {
-    entries: std.ArrayListUnmanaged(LineTokenCacheEntry) = .{},
+    entries: std.ArrayListUnmanaged(LineTokenCacheEntry) = .empty,
     cached_line_count: u32 = 0,
     cached_language: Language = .none,
     cached_edit_counter: u32 = 0xFFFFFFFF,
@@ -98,10 +98,10 @@ pub const RenderState = struct {
     line_numbers: RectList,
     line_number_labels: LineNumberList,
     bracket_highlights: RectList,
-    cluster_strings: std.ArrayListUnmanaged(u8) = .{},
+    cluster_strings: std.ArrayListUnmanaged(u8) = .empty,
     line_state_cache: LineStateCache = .{},
     line_token_cache: LineTokenCache = .{},
-    scratch_line: std.ArrayListUnmanaged(u8) = .{},
+    scratch_line: std.ArrayListUnmanaged(u8) = .empty,
 
     // Cached bracket match to avoid recomputing every frame
     cached_bracket_cursor_line: u32 = 0xFFFFFFFF,
@@ -113,12 +113,12 @@ pub const RenderState = struct {
     pub fn init(allocator: Allocator) RenderState {
         return .{
             .allocator = allocator,
-            .cells = .{},
-            .cursors = .{},
-            .selections = .{},
-            .line_numbers = .{},
-            .line_number_labels = .{},
-            .bracket_highlights = .{},
+            .cells = .empty,
+            .cursors = .empty,
+            .selections = .empty,
+            .line_numbers = .empty,
+            .line_number_labels = .empty,
+            .bracket_highlights = .empty,
         };
     }
 
@@ -557,8 +557,12 @@ pub const RenderState = struct {
             const ec_y = @as(f32, @floatFromInt(ec_base_vrow + ec_metrics.segment)) * cell_h - editor.scroll_y;
 
             self.cursors.append(self.allocator, .{
-                .x = ec_x, .y = ec_y, .w = 2, .h = cell_h,
-                .color = config.cursor_color, .style = 1,
+                .x = ec_x,
+                .y = ec_y,
+                .w = 2,
+                .h = cell_h,
+                .color = config.cursor_color,
+                .style = 1,
             }) catch {};
 
             // Render selection for this extra cursor
@@ -581,7 +585,10 @@ pub const RenderState = struct {
                     const sy = @as(f32, @floatFromInt(s_vrow + s_met.segment)) * cell_h - editor.scroll_y;
                     if (sy + cell_h >= 0 and sy <= vp_h and ex > sx) {
                         self.selections.append(self.allocator, .{
-                            .x = sx, .y = sy, .w = ex - sx, .h = cell_h,
+                            .x = sx,
+                            .y = sy,
+                            .w = ex - sx,
+                            .h = cell_h,
                             .color = config.selection_color,
                         }) catch {};
                     }

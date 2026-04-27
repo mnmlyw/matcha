@@ -34,7 +34,7 @@ pub const Editor = struct {
     render_state: RenderState,
 
     // Multi-cursor state
-    extra_cursors: std.ArrayListUnmanaged(CursorState) = .{},
+    extra_cursors: std.ArrayListUnmanaged(CursorState) = .empty,
     multi_cursor_word: ?[]u8 = null,
 
     // Viewport
@@ -70,12 +70,12 @@ pub const Editor = struct {
     has_error: bool = false,
 
     // Wrap cache: prefix_sums[i] = total visual rows for lines 0..i-1
-    wrap_prefix_sums: std.ArrayListUnmanaged(u32) = .{},
+    wrap_prefix_sums: std.ArrayListUnmanaged(u32) = .empty,
     wrap_cache_edit_counter: u32 = 0xFFFFFFFF,
     wrap_cache_wrap_width_bits: u32 = 0xFFFFFFFF,
 
     // Search cache: contiguous buffer snapshot for repeated find operations
-    search_content_cache: std.ArrayListUnmanaged(u8) = .{},
+    search_content_cache: std.ArrayListUnmanaged(u8) = .empty,
     search_cache_edit_counter: u32 = 0xFFFFFFFF,
 
     pub fn init(allocator: Allocator, config: *const Config) Editor {
@@ -171,9 +171,12 @@ pub const Editor = struct {
     }
 
     pub fn openFile(self: *Editor, path: []const u8) !void {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-        const content = try file.readToEndAlloc(self.allocator, 100 * 1024 * 1024); // 100MB max
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        var read_buf: [64 * 1024]u8 = undefined;
+        var file_reader = file.reader(io, &read_buf);
+        const content = try file_reader.interface.allocRemaining(self.allocator, .limited(100 * 1024 * 1024)); // 100MB max
         defer self.allocator.free(content);
 
         var new_buffer = try PieceTable.initWithContent(self.allocator, content);
@@ -220,9 +223,10 @@ pub const Editor = struct {
         const content = try self.buffer.getContent(self.allocator);
         defer self.allocator.free(content);
 
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
-        try file.writeAll(content);
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, content);
 
         if (!std.mem.eql(u8, path, self.filename orelse "")) {
             if (self.filename_owned) {
@@ -1421,7 +1425,7 @@ pub const Editor = struct {
             seen.deinit(alloc);
         }
 
-        var results: std.ArrayListUnmanaged(u8) = .{};
+        var results: std.ArrayListUnmanaged(u8) = .empty;
         defer results.deinit(alloc);
         var count: u32 = 0;
         const max_results: u32 = 50;
@@ -2944,14 +2948,15 @@ test "Editor: UTF-8 delete backward" {
 }
 
 test "Editor: openFile resets state and clears undo history" {
+    const io = std.Io.Threaded.global_single_threaded.io();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(io, .{
         .sub_path = "sample.txt",
         .data = "loaded\ntext",
     });
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "sample.txt");
+    const path = try tmp.dir.realPathFileAlloc(io, "sample.txt", testing.allocator);
     defer testing.allocator.free(path);
 
     const config = Config.defaults();
@@ -2985,7 +2990,8 @@ test "Editor: openFile failure preserves current document" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const dir_path = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
     defer testing.allocator.free(dir_path);
     const missing_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "missing.txt" });
     defer testing.allocator.free(missing_path);

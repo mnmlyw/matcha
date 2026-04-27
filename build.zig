@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
     var sdk_path: ?[]const u8 = null;
 
     if (isMacosTarget(target) and b.sysroot == null) {
-        if (std.zig.system.darwin.getSdk(b.allocator, &target.result)) |sdk| {
+        if (std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result)) |sdk| {
             sdk_path = sdk;
             b.sysroot = sdk;
         }
