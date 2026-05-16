@@ -95,9 +95,16 @@ pub const PieceTable = struct {
             return;
         }
 
-        // Find which piece contains `pos`
-        var offset: u32 = 0;
-        var idx: usize = 0;
+        // Find which piece contains `pos`. Resume from the byteAt hint when
+        // possible — consecutive insertions at growing positions (typing
+        // forward) hit the same or next piece each call, so restarting at
+        // index 0 each time is wasted work.
+        var idx: usize = self.hint_piece_idx;
+        var offset: u32 = self.hint_piece_offset;
+        if (idx >= self.pieces.items.len or offset > pos) {
+            idx = 0;
+            offset = 0;
+        }
         while (idx < self.pieces.items.len) : (idx += 1) {
             const p = self.pieces.items[idx];
             if (pos <= offset + p.length) break;

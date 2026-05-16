@@ -1223,6 +1223,10 @@ pub const Editor = struct {
 
         const total: u32 = @intCast(content.len);
         const wlen: u32 = @intCast(word.len);
+        // The buffer can shrink below the search word length between calls
+        // (e.g. user deleted text after the first occurrence was selected);
+        // without this guard, `content[search_pos..][0..wlen]` would OOB.
+        if (total < wlen) return;
         var search_pos = max_pos;
         var checked: u32 = 0;
 

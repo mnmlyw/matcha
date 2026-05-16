@@ -80,15 +80,29 @@ final class UpdateChecker {
     }
 
     /// Semver comparison: returns true if remote > local.
+    /// Pre-release suffixes (`-rc.1`, `-beta`, `-dev`) are stripped before
+    /// numeric comparison and treated as *older* than the base version per
+    /// semver. Previously `compactMap { Int($0) }` silently dropped any
+    /// segment containing a `-`, which produced wrong ordering for tags
+    /// like `1.0.0-rc1` vs `1.0.0`.
     private func isNewer(remote: String, local: String) -> Bool {
-        let r = remote.split(separator: ".").compactMap { Int($0) }
-        let l = local.split(separator: ".").compactMap { Int($0) }
+        let rRelease = remote.split(separator: "-", maxSplits: 1).first.map(String.init) ?? remote
+        let lRelease = local.split(separator: "-", maxSplits: 1).first.map(String.init) ?? local
+        let rPre = remote.contains("-")
+        let lPre = local.contains("-")
+
+        let r = rRelease.split(separator: ".").compactMap { Int($0) }
+        let l = lRelease.split(separator: ".").compactMap { Int($0) }
         for i in 0..<max(r.count, l.count) {
             let rv = i < r.count ? r[i] : 0
             let lv = i < l.count ? l[i] : 0
             if rv > lv { return true }
             if rv < lv { return false }
         }
+        // Numerically equal: pre-release loses to a non-pre-release.
+        // e.g. remote=1.0.0-rc1 vs local=1.0.0 → false (don't prompt)
+        //      remote=1.0.0 vs local=1.0.0-rc1 → true (prompt to update)
+        if !rPre && lPre { return true }
         return false
     }
 }

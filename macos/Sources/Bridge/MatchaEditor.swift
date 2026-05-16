@@ -198,6 +198,13 @@ class MatchaEditor: ObservableObject {
         return str
     }
 
+    /// Returns the buffer as a Swift String. Invalid UTF-8 bytes are
+    /// replaced with U+FFFD — this is acceptable for IME / UTF-16 offset
+    /// queries (selectedRange / markedRange / firstRect / characterIndex)
+    /// where the result is only used to convert positions, not to write
+    /// bytes back to the buffer. **Do not use this path for clipboard
+    /// copy or save** — those must go through `getSelectionText` (or the
+    /// editor's own save flow) which preserve the original bytes exactly.
     func getContent() -> String? {
         guard let h = handle else { return nil }
         var len: UInt32 = 0
