@@ -595,7 +595,22 @@ class MetalRenderer {
     private func rasterizeClusterGlyph(key: UInt32, string: String) -> GlyphUV {
         let attrStr = NSAttributedString(string: string, attributes: [.font: ctFont as NSFont])
         let line = CTLineCreateWithAttributedString(attrStr)
-        let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        // .useGlyphPathBounds returns a zero rect for color emoji fonts —
+        // Apple Color Emoji has no outlines, so the path-bounds query is
+        // empty. Fall back to typographic bounds (the line's natural
+        // advance + ascent/descent) so the glyph still renders.
+        var bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        if bounds.width <= 0 || bounds.height <= 0 {
+            let advance = CTLineGetTypographicBounds(line, nil, nil, nil)
+            let ascent = CTFontGetAscent(ctFont)
+            let descent = CTFontGetDescent(ctFont)
+            bounds = CGRect(
+                x: 0,
+                y: -descent,
+                width: CGFloat(advance),
+                height: CGFloat(ascent + descent)
+            )
+        }
 
         let padding: CGFloat = 2
         let glyphW = Int(ceil(bounds.width) + padding * 2)

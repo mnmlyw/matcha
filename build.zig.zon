@@ -1,8 +1,8 @@
 .{
     .name = .matcha,
-    .version = "0.1.0",
+    .version = "0.5.2",
     .fingerprint = 0x98a71109acc14702,
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",

@@ -361,23 +361,41 @@ pub const Editor = struct {
                 // ASCII fast path
                 prev_pos = pos - 1;
                 del_len = 1;
-            } else if (self.buffer.getRange(self.allocator, line_start, pos)) |line_data| {
-                // Non-ASCII: scan for cluster boundary
-                defer self.allocator.free(line_data);
-                var scan: u32 = 0;
-                var last_start: u32 = 0;
-                while (scan < line_data.len) {
-                    last_start = scan;
-                    const cl = nextClusterLen(line_data, scan);
-                    if (cl == 0) break;
-                    scan += cl;
+            } else {
+                // Non-ASCII: bound the look-back to ~64 bytes — a generous
+                // cap on any realistic grapheme cluster (a ZWJ family is
+                // ~25 bytes; flags 8). Previously this scanned from line
+                // start, paying O(line length) per backspace on long
+                // non-ASCII lines.
+                const cap: u32 = 64;
+                var window_start: u32 = if (pos - line_start > cap) pos - cap else line_start;
+                // Realign forward to a codepoint boundary so we don't start
+                // mid-multibyte-sequence.
+                while (window_start < pos) {
+                    const b = self.buffer.byteAt(window_start) orelse break;
+                    if ((b & 0xC0) != 0x80) break;
+                    window_start += 1;
                 }
-                prev_pos = line_start + last_start;
-                del_len = pos - prev_pos;
-            } else |_| {
-                // Alloc failed: fall back to codepoint
-                prev_pos = self.buffer.prevCodepointStart(pos);
-                del_len = pos - prev_pos;
+
+                if (window_start >= pos) {
+                    prev_pos = self.buffer.prevCodepointStart(pos);
+                    del_len = pos - prev_pos;
+                } else if (self.buffer.getRange(self.allocator, window_start, pos)) |window_data| {
+                    defer self.allocator.free(window_data);
+                    var scan: u32 = 0;
+                    var last_start: u32 = 0;
+                    while (scan < window_data.len) {
+                        last_start = scan;
+                        const cl = nextClusterLen(window_data, scan);
+                        if (cl == 0) break;
+                        scan += cl;
+                    }
+                    prev_pos = window_start + last_start;
+                    del_len = pos - prev_pos;
+                } else |_| {
+                    prev_pos = self.buffer.prevCodepointStart(pos);
+                    del_len = pos - prev_pos;
+                }
             }
         }
 

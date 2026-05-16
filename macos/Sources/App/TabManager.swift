@@ -3,7 +3,12 @@ import AppKit
 import Combine
 import MatchaKit
 
+@MainActor
 class TabManager: ObservableObject {
+    // Static storage and every mutator runs on the main actor — TabManager is
+    // touched only from SwiftUI views, AppKit notifications dispatched to
+    // .main, and Combine sinks scheduled on main. Annotating the class lets
+    // Swift's concurrency checker enforce that contract.
     private static var allInstances: [WeakTabRef] = []
 
     private final class WeakTabRef {

@@ -255,12 +255,22 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     /// Tell the Zig core about the viewport in **points** (not pixels).
+    /// Derive size from the drawable rather than `bounds` so a mid-resize
+    /// backing-scale change can't desync the viewport from what the renderer
+    /// is actually drawing into. Falls back to `bounds` before the first
+    /// drawable is available.
     private func updateViewport() {
-        let width = UInt32(bounds.width)
-        let height = UInt32(bounds.height)
+        let drawable = drawableSize
+        let backingScale = window?.backingScaleFactor ?? CGFloat(layer?.contentsScale ?? 2.0)
+        let pointWidth: CGFloat = drawable.width > 0 && backingScale > 0
+            ? drawable.width / backingScale
+            : bounds.width
+        let pointHeight: CGFloat = drawable.height > 0 && backingScale > 0
+            ? drawable.height / backingScale
+            : bounds.height
         editor.setViewport(
-            width: width,
-            height: height,
+            width: UInt32(pointWidth),
+            height: UInt32(pointHeight),
             cellWidth: Float(cellWidth),
             cellHeight: Float(cellHeight)
         )

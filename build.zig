@@ -1,5 +1,9 @@
 const std = @import("std");
 
+/// Single source of truth for the package version, pulled from build.zig.zon
+/// so the plist, the zon, and any version-bump scripts can't drift apart.
+const package_version = @import("build.zig.zon").version;
+
 const default_macos_min_version = std.SemanticVersion{
     .major = 14,
     .minor = 0,
@@ -103,8 +107,7 @@ pub fn build(b: *std.Build) void {
         app.dependOn(&fail_cmd.step);
     } else if (swiftArchName(target.result.cpu.arch)) |swift_arch| {
         const min_version = formatSemver(b, macosMinVersion(target));
-        const release_version = "0.5.2";
-        const short_version = if (optimize == .Debug) "0.0.0-dev" else release_version;
+        const short_version = if (optimize == .Debug) "0.0.0-dev" else package_version;
         const info_plist = b.addWriteFiles().add("Matcha-Info.plist", b.fmt(
             \\<?xml version="1.0" encoding="UTF-8"?>
             \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
