@@ -16,6 +16,10 @@ class MetalRenderer {
     var emojiAtlasTexture: MTLTexture?
     var glyphCache: [UInt32: GlyphUV] = [:]
     var clusterGlyphCache: [String: GlyphUV] = [:]
+    /// Fallback CTFont per codepoint — CTFontCreateForString is expensive and
+    /// was being called inside the rasterize hot path for every unknown
+    /// codepoint of every frame.
+    var fallbackFontCache: [UInt32: CTFont] = [:]
     let ctFont: CTFont
     let cellWidth: Float
     let cellHeight: Float
@@ -145,6 +149,9 @@ class MetalRenderer {
     }
 
     func draw(in view: MTKView, editor: MatchaEditor, cursorVisible: Bool, inlineHint: String? = nil) {
+        // Skip rendering when the window is minimized or has zero backing size;
+        // otherwise we'd encode and present an empty frame on every timer tick.
+        guard view.drawableSize.width > 0, view.drawableSize.height > 0 else { return }
         guard let drawable = view.currentDrawable,
               let renderPassDescriptor = view.currentRenderPassDescriptor,
               let commandBuffer = commandQueue.makeCommandBuffer() else { return }
@@ -384,14 +391,36 @@ class MetalRenderer {
         }
     }
 
+    /// Cap on vertex buffer size (~4 MiB / 65k vertices). Beyond this we stop
+    /// doubling and grow linearly so a transient huge frame doesn't pin VRAM
+    /// for the rest of the session across six per-pass buffers.
+    private static let vertexBufferGrowthCap = quadStride * 65_536
+    /// If a buffer exceeds the cap and shrinks back down, recreate it so we
+    /// don't permanently hold the peak allocation.
+    private static let vertexBufferShrinkThreshold = vertexBufferGrowthCap / 4
+
     private static func uploadVertices(_ vertices: [QuadVertex], device: MTLDevice, into buffer: inout MTLBuffer?) -> MTLBuffer? {
         guard !vertices.isEmpty else { return nil }
 
         let requiredLength = max(vertices.count * quadStride, quadStride)
+
+        // Shrink if the current buffer is well above the cap and the current
+        // frame fits in a much smaller allocation.
+        if let existing = buffer,
+           existing.length > vertexBufferGrowthCap,
+           requiredLength < vertexBufferShrinkThreshold {
+            buffer = nil
+        }
+
         if buffer == nil || buffer!.length < requiredLength {
             var newLength = max(buffer?.length ?? quadStride * 64, quadStride * 64)
+            // Double-grow up to the cap, then grow linearly in chunks of the cap.
             while newLength < requiredLength {
-                newLength *= 2
+                if newLength < vertexBufferGrowthCap {
+                    newLength *= 2
+                } else {
+                    newLength += vertexBufferGrowthCap
+                }
             }
             buffer = device.makeBuffer(length: newLength, options: .storageModeShared)
         }
@@ -497,7 +526,12 @@ class MetalRenderer {
                 return cached
             }
             let uv = rasterizeClusterGlyph(key: codepoint, string: str)
-            clusterGlyphCache[str] = uv
+            // Only cache successful rasterizations. An empty UV here means the
+            // atlas overflowed; caching it would prevent retry on a later
+            // frame (after eviction or a larger atlas).
+            if uv.glyphWidth > 0 {
+                clusterGlyphCache[str] = uv
+            }
             return uv
         }
 
@@ -520,10 +554,14 @@ class MetalRenderer {
 
         var renderFont: CTFont = ctFont
         if glyphs[0] == 0 {
-            if let scalar = Unicode.Scalar(codepoint) {
+            if let cached = fallbackFontCache[codepoint] {
+                renderFont = cached
+                CTFontGetGlyphsForCharacters(renderFont, chars, &glyphs, count)
+            } else if let scalar = Unicode.Scalar(codepoint) {
                 let str = String(scalar) as CFString
                 let range = CFRange(location: 0, length: CFStringGetLength(str))
                 renderFont = CTFontCreateForString(ctFont, str, range)
+                fallbackFontCache[codepoint] = renderFont
                 CTFontGetGlyphsForCharacters(renderFont, chars, &glyphs, count)
             }
         }
@@ -594,14 +632,13 @@ class MetalRenderer {
 
         if let data = ctx.data {
             let ptr = data.bindMemory(to: UInt8.self, capacity: glyphW * glyphH * 4)
-            for row in 0..<glyphH {
-                for col in 0..<glyphW {
-                    let srcIdx = (row * glyphW + col) * 4
-                    let dstIdx = ((emojiCursorY + row) * emojiAtlasWidth + (emojiCursorX + col)) * 4
-                    emojiAtlasData[dstIdx] = ptr[srcIdx]
-                    emojiAtlasData[dstIdx + 1] = ptr[srcIdx + 1]
-                    emojiAtlasData[dstIdx + 2] = ptr[srcIdx + 2]
-                    emojiAtlasData[dstIdx + 3] = ptr[srcIdx + 3]
+            let rowBytes = glyphW * 4
+            emojiAtlasData.withUnsafeMutableBufferPointer { atlasBuf in
+                guard let atlasBase = atlasBuf.baseAddress else { return }
+                for row in 0..<glyphH {
+                    let srcRow = ptr.advanced(by: row * rowBytes)
+                    let dstRow = atlasBase.advanced(by: ((emojiCursorY + row) * emojiAtlasWidth + emojiCursorX) * 4)
+                    memcpy(dstRow, srcRow, rowBytes)
                 }
             }
         }
@@ -637,17 +674,20 @@ class MetalRenderer {
             atlasCursorY += atlasRowHeight + 1
             atlasRowHeight = 0
         }
+        // Atlas full — return an empty UV WITHOUT caching it, so a subsequent
+        // frame (after a hypothetical eviction or atlas resize) can retry.
+        // Caching here would make the loss permanent.
         if atlasCursorY + glyphH > atlasHeight {
-            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
-                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
-            glyphCache[codepoint] = uv
-            return uv
+            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
         }
 
         let colorSpace = CGColorSpaceCreateDeviceGray()
         guard let ctx = CGContext(data: nil, width: glyphW, height: glyphH,
                                   bitsPerComponent: 8, bytesPerRow: glyphW,
                                   space: colorSpace, bitmapInfo: CGImageAlphaInfo.none.rawValue) else {
+            // Context creation failure is permanent for this codepoint at this
+            // size; safe to cache the empty UV.
             let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                               bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
             glyphCache[codepoint] = uv
@@ -662,9 +702,14 @@ class MetalRenderer {
 
         if let data = ctx.data {
             let ptr = data.bindMemory(to: UInt8.self, capacity: glyphW * glyphH)
-            for row in 0..<glyphH {
-                for col in 0..<glyphW {
-                    atlasData[(atlasCursorY + row) * atlasWidth + (atlasCursorX + col)] = ptr[row * glyphW + col]
+            // Row-at-a-time memcpy — orders of magnitude faster than the prior
+            // per-pixel Swift loop, which paid for bounds checks on every byte.
+            atlasData.withUnsafeMutableBufferPointer { atlasBuf in
+                guard let atlasBase = atlasBuf.baseAddress else { return }
+                for row in 0..<glyphH {
+                    let srcRow = ptr.advanced(by: row * glyphW)
+                    let dstRow = atlasBase.advanced(by: (atlasCursorY + row) * atlasWidth + atlasCursorX)
+                    memcpy(dstRow, srcRow, glyphW)
                 }
             }
         }
@@ -701,11 +746,10 @@ class MetalRenderer {
             emojiCursorY += emojiRowHeight + 1
             emojiRowHeight = 0
         }
+        // See rasterizeMonoGlyph: don't cache empty UV on atlas overflow.
         if emojiCursorY + glyphH > emojiAtlasHeight {
-            let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
-                              bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
-            glyphCache[codepoint] = uv
-            return uv
+            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
         }
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -725,14 +769,13 @@ class MetalRenderer {
 
         if let data = ctx.data {
             let ptr = data.bindMemory(to: UInt8.self, capacity: glyphW * glyphH * 4)
-            for row in 0..<glyphH {
-                for col in 0..<glyphW {
-                    let srcIdx = (row * glyphW + col) * 4
-                    let dstIdx = ((emojiCursorY + row) * emojiAtlasWidth + (emojiCursorX + col)) * 4
-                    emojiAtlasData[dstIdx] = ptr[srcIdx]         // B
-                    emojiAtlasData[dstIdx + 1] = ptr[srcIdx + 1] // G
-                    emojiAtlasData[dstIdx + 2] = ptr[srcIdx + 2] // R
-                    emojiAtlasData[dstIdx + 3] = ptr[srcIdx + 3] // A
+            let rowBytes = glyphW * 4
+            emojiAtlasData.withUnsafeMutableBufferPointer { atlasBuf in
+                guard let atlasBase = atlasBuf.baseAddress else { return }
+                for row in 0..<glyphH {
+                    let srcRow = ptr.advanced(by: row * rowBytes)
+                    let dstRow = atlasBase.advanced(by: ((emojiCursorY + row) * emojiAtlasWidth + emojiCursorX) * 4)
+                    memcpy(dstRow, srcRow, rowBytes)
                 }
             }
         }

@@ -70,6 +70,8 @@ void matcha_init(void);
 matcha_config_t matcha_config_new(void);
 void matcha_config_free(matcha_config_t cfg);
 bool matcha_config_load_file(matcha_config_t cfg, const char* path);
+/// Returns a malloc'd string the caller must free with matcha_free_string.
+/// NULL if the key is unknown.
 const char* matcha_config_get_string(matcha_config_t cfg, const char* key);
 int64_t matcha_config_get_int(matcha_config_t cfg, const char* key);
 bool matcha_config_get_bool(matcha_config_t cfg, const char* key);
@@ -141,6 +143,10 @@ char* matcha_editor_get_selection_text(matcha_editor_t ed);
 char* matcha_editor_get_content(matcha_editor_t ed, uint32_t* len);
 bool matcha_editor_get_selection_offsets(matcha_editor_t ed, uint32_t* start, uint32_t* end);
 uint32_t matcha_editor_get_cursor_offset(matcha_editor_t ed);
+/// Monotonic version counter. Bumped on every buffer mutation. Callers can
+/// cache content/UTF-16 mappings keyed on this value and refetch when it
+/// changes. Wraps on 32-bit overflow.
+uint32_t matcha_editor_get_buffer_version(matcha_editor_t ed);
 void matcha_editor_paste(matcha_editor_t ed, const char* text, uint32_t len);
 void matcha_editor_replace_range(matcha_editor_t ed, uint32_t start, uint32_t end,
                                   const char* text, uint32_t len);

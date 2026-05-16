@@ -13,6 +13,10 @@ pub const Config = struct {
     line_numbers: bool = true,
     wrap_lines: bool = true,
     auto_update: bool = true,
+    /// Path the config was loaded from, owned via `allocator`. Saved so
+    /// `set_system_dark` can re-overlay user color overrides on top of the
+    /// resolved theme without wiping them.
+    loaded_path: ?[]u8 = null,
 
     // Appearance: "light", "dark", or "auto" (follows system)
     appearance: Appearance = .auto,
@@ -128,6 +132,10 @@ pub const Config = struct {
             if (self.allocator) |alloc| {
                 alloc.free(self.font_family);
             }
+        }
+        if (self.loaded_path) |p| {
+            if (self.allocator) |alloc| alloc.free(p);
+            self.loaded_path = null;
         }
     }
 

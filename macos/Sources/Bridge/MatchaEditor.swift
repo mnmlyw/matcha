@@ -209,6 +209,25 @@ class MatchaEditor: ObservableObject {
         return content
     }
 
+    /// Cached buffer content keyed on the Zig-side version counter. AppKit's
+    /// IME path calls selectedRange/markedRange/firstRect/characterIndex/etc.
+    /// repeatedly within a single input loop iteration — fetching and decoding
+    /// the full buffer for each query was O(file size) per keystroke during
+    /// composition. We refetch only when the version actually changes.
+    private var cachedContent: String?
+    private var cachedContentVersion: UInt32 = .max
+    func getContentCached() -> String? {
+        guard let h = handle else { return nil }
+        let version = matcha_editor_get_buffer_version(h)
+        if let cached = cachedContent, version == cachedContentVersion {
+            return cached
+        }
+        let fresh = getContent()
+        cachedContent = fresh
+        cachedContentVersion = version
+        return fresh
+    }
+
     func getSelectionOffsets() -> Range<UInt32>? {
         guard let h = handle else { return nil }
         var start: UInt32 = 0

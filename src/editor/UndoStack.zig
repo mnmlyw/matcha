@@ -56,7 +56,7 @@ pub const UndoStack = struct {
         self.current_ops.deinit(self.allocator);
     }
 
-    fn freeGroup(self: *UndoStack, group: EditGroup) void {
+    pub fn freeGroup(self: *UndoStack, group: EditGroup) void {
         for (group.ops) |op| {
             self.allocator.free(op.text);
         }
@@ -107,6 +107,10 @@ pub const UndoStack = struct {
         if (self.current_ops.items.len == 0) return false;
 
         const ops = try self.allocator.dupe(EditOp, self.current_ops.items);
+        // If the append fails, free the outer slice (its inner EditOp.text
+        // buffers are still owned by current_ops and will be freed via deinit
+        // or discardCurrentGroup; only the outer dupe leaks otherwise).
+        errdefer self.allocator.free(ops);
         try self.undo_stack.append(self.allocator, .{
             .ops = ops,
             .cursor_line = self.current_cursor_line,

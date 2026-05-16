@@ -1,5 +1,6 @@
 import AppKit
 import MetalKit
+import UniformTypeIdentifiers
 import MatchaKit
 
 class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
@@ -9,6 +10,8 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     var cursorVisible = true
     var trackingArea: NSTrackingArea?
     var keyWindowObserver: NSObjectProtocol?
+    var screenChangeObserver: NSObjectProtocol?
+    var occlusionObserver: NSObjectProtocol?
 
     // Font metrics (in points)
     var cellWidth: CGFloat = 8.4
@@ -61,7 +64,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         // Set up renderer — rasterize glyphs at Retina resolution for crispness
         if let device = self.device {
             let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-            let scaledFont = NSFont(descriptor: font.fontDescriptor, size: font.pointSize * scale)!
+            let scaledFont = NSFont(descriptor: font.fontDescriptor, size: font.pointSize * scale) ?? font
             renderer = MetalRenderer(device: device, view: self, font: scaledFont,
                                      cellWidth: Float(cellWidth), cellHeight: Float(cellHeight),
                                      scaleFactor: Float(scale))
@@ -89,17 +92,23 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             NotificationCenter.default.removeObserver(observer)
             keyWindowObserver = nil
         }
+        if let observer = screenChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            screenChangeObserver = nil
+        }
+        if let observer = occlusionObserver {
+            NotificationCenter.default.removeObserver(observer)
+            occlusionObserver = nil
+        }
     }
 
     override var acceptsFirstResponder: Bool { true }
-
-    @objc private func screenDidChange() { checkScaleFactor() }
 
     private func checkScaleFactor() {
         guard let screen = window?.screen, let r = renderer, let device = self.device else { return }
         let newScale = Float(screen.backingScaleFactor)
         if newScale != r.scaleFactor {
-            let scaledFont = NSFont(descriptor: font.fontDescriptor, size: font.pointSize * CGFloat(newScale))!
+            let scaledFont = NSFont(descriptor: font.fontDescriptor, size: font.pointSize * CGFloat(newScale)) ?? font
             renderer = MetalRenderer(device: device, view: self, font: scaledFont,
                                      cellWidth: Float(cellWidth), cellHeight: Float(cellHeight),
                                      scaleFactor: newScale)
@@ -124,7 +133,14 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
             NotificationCenter.default.removeObserver(observer)
             keyWindowObserver = nil
         }
-        NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
+        if let observer = screenChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            screenChangeObserver = nil
+        }
+        if let observer = occlusionObserver {
+            NotificationCenter.default.removeObserver(observer)
+            occlusionObserver = nil
+        }
 
         if let window {
             keyWindowObserver = NotificationCenter.default.addObserver(
@@ -143,11 +159,28 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
                 alpha: 1.0)
             window.makeFirstResponder(self)
             editor.markActive()
-            // Update renderer when screen scale factor changes (multi-display)
+            // Update renderer when screen scale factor changes (multi-display).
+            // We use the block-form observer (token-based) so we can remove it
+            // with the exact same object — the prior selector-based registration
+            // was added with object: window but removed with object: nil, which
+            // leaks one observer per window change.
             checkScaleFactor()
-            NotificationCenter.default.addObserver(
-                self, selector: #selector(screenDidChange),
-                name: NSWindow.didChangeScreenNotification, object: window)
+            screenChangeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeScreenNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.checkScaleFactor()
+            }
+            // Pause/resume the cursor blink timer when the window's occlusion
+            // changes so we don't burn battery animating an invisible cursor.
+            occlusionObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.startCursorBlink()
+            }
             updateViewport()
             requestRedraw()
         }
@@ -408,6 +441,17 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     private func startCursorBlink() {
         cursorBlinkTimer?.invalidate()
+        // Don't burn battery blinking when the window is hidden, miniaturized,
+        // or fully occluded — there's no surface to update.
+        if let window = self.window {
+            let visible = window.isVisible
+                && !window.isMiniaturized
+                && window.occlusionState.contains(.visible)
+            if !visible {
+                cursorBlinkTimer = nil
+                return
+            }
+        }
         cursorBlinkTimer = Timer.scheduledTimer(withTimeInterval: 0.53, repeats: true) { [weak self] _ in
             self?.cursorVisible.toggle()
             self?.requestRedraw()
@@ -448,11 +492,34 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     private var inlineHintWorkItem: DispatchWorkItem?
 
+    /// Synchronously trim the current inline hint by the just-typed text.
+    /// The hint is otherwise only refreshed on a 100ms-delayed work item, so
+    /// without this step the user sees the old full hint rendered after the
+    /// new cursor position for one frame — which looks like the prediction
+    /// has been pushed forward by the character they just typed.
+    private func consumeInlineHintIfMatches(_ typed: String) {
+        guard let hint = inlineHint, !hint.isEmpty else { return }
+        // IME composition / multi-scalar inserts: drop the stale hint, the
+        // async refresh will recompute.
+        guard typed.unicodeScalars.count >= 1 else { return }
+        if hint.hasPrefix(typed) {
+            let remaining = String(hint.dropFirst(typed.count))
+            inlineHint = remaining.isEmpty ? nil : remaining
+        } else {
+            inlineHint = nil
+        }
+    }
+
     private func refreshInlineHint() {
         inlineHintWorkItem?.cancel()
+        // Capture the editor at scheduling time so a tab swap during the
+        // 100ms delay can't pollute the new tab's hint state. We compare
+        // identity at fire time and bail if it diverged.
+        let scheduledEditor = self.editor
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            if let result = self.editor.getCompletions(), !result.words.isEmpty {
+            guard self.editor === scheduledEditor else { return }
+            if let result = scheduledEditor.getCompletions(), !result.words.isEmpty {
                 let best = result.words[0]
                 let suffix = String(best.dropFirst(result.prefixLen))
                 self.inlineHint = suffix.isEmpty ? nil : suffix
@@ -642,7 +709,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     func insertText(_ string: Any, replacementRange: NSRange) {
         let plain = plainString(from: string)
         let existingMarkedRange = markedByteRange
-        let content = editor.getContent() ?? ""
+        let content = editor.getContentCached() ?? ""
 
         if let marked = existingMarkedRange {
             editor.replaceRange(start: marked.lowerBound, end: marked.upperBound, text: plain)
@@ -656,12 +723,16 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
         clearMarkedTextState()
         inputHandled = true
+        // Trim the on-screen hint immediately so the next frame doesn't show
+        // a duplicated character. The async refresh below confirms the new
+        // hint after ~100ms once the editor finishes its completion query.
+        consumeInlineHintIfMatches(plain)
         refreshInlineHint()
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         let plain = plainString(from: string)
-        let content = editor.getContent() ?? ""
+        let content = editor.getContentCached() ?? ""
         let replacedRange = replacementByteRange(for: replacementRange, in: content)
 
         editor.replaceRange(start: replacedRange.lowerBound, end: replacedRange.upperBound, text: plain)
@@ -689,7 +760,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     func selectedRange() -> NSRange {
-        guard let content = editor.getContent() else {
+        guard let content = editor.getContentCached() else {
             return NSRange(location: NSNotFound, length: 0)
         }
 
@@ -705,7 +776,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     func markedRange() -> NSRange {
-        guard let marked = markedByteRange, let content = editor.getContent() else {
+        guard let marked = markedByteRange, let content = editor.getContentCached() else {
             return NSRange(location: NSNotFound, length: 0)
         }
 
@@ -723,7 +794,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
-        guard let content = editor.getContent() else {
+        guard let content = editor.getContentCached() else {
             actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
             return nil
         }
@@ -740,7 +811,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     func characterIndex(for point: NSPoint) -> Int {
-        guard let content = editor.getContent() else { return 0 }
+        guard let content = editor.getContentCached() else { return 0 }
 
         let localPoint: NSPoint
         if let window {
@@ -755,7 +826,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-        let content = editor.getContent() ?? ""
+        let content = editor.getContentCached() ?? ""
         let clamped = clampUTF16Range(range, maxLength: content.utf16.count)
         let offset = utf16RangeToByteRange(NSRange(location: clamped.location, length: 0), in: content)?.lowerBound
             ?? editor.getCursorOffset()
@@ -849,10 +920,28 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
                 options: [.urlReadingFileURLsOnly: true]) as? [URL],
-              let url = urls.first else { return false }
-        // Route through ContentView's open-file flow (respects unsaved tabs)
-        NotificationCenter.default.post(name: .matchaOpenFilePath, object: nil,
-                                        userInfo: ["path": url.path])
-        return true
+              !urls.isEmpty else { return false }
+
+        var opened = false
+        for url in urls {
+            // Reject obvious non-text binaries up front. We accept text/source
+            // code, anything without a known type (dotfiles, config files), and
+            // fall back to attempting to open. The Zig core enforces a size cap
+            // and reports a load error if the bytes are unreadable.
+            if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
+                let isBinary = type.conforms(to: .image)
+                    || type.conforms(to: .audio)
+                    || type.conforms(to: .movie)
+                    || type.conforms(to: .archive)
+                    || type.conforms(to: .executable)
+                let isText = type.conforms(to: .text) || type.conforms(to: .sourceCode)
+                if isBinary && !isText { continue }
+            }
+            // Route through ContentView's open-file flow (respects unsaved tabs)
+            NotificationCenter.default.post(name: .matchaOpenFilePath, object: nil,
+                                            userInfo: ["path": url.path])
+            opened = true
+        }
+        return opened
     }
 }

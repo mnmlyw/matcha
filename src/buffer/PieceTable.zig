@@ -25,6 +25,11 @@ pub const PieceTable = struct {
     cached_total_length: ?u32 = null,
     /// Cached byte offsets where each line starts. line_starts[i] = byte offset of line i.
     line_starts: std.ArrayListUnmanaged(u32) = .empty,
+    /// Last-resolved (piece_index, logical_offset_of_that_piece) for byteAt.
+    /// Sequential or nearby accesses can resume from here instead of walking
+    /// pieces from index 0 every call. Cleared on any mutation.
+    hint_piece_idx: u32 = 0,
+    hint_piece_offset: u32 = 0,
 
     pub fn init(allocator: Allocator) PieceTable {
         return .{
@@ -141,42 +146,51 @@ pub const PieceTable = struct {
 
         var remaining = len;
 
-        while (remaining > 0) {
-            var offset: u32 = 0;
-            var idx: usize = 0;
-            // Always search from `pos` since earlier pieces may have been removed/shrunk
-            while (idx < self.pieces.items.len) : (idx += 1) {
-                const p = self.pieces.items[idx];
-                if (pos < offset + p.length) break;
-                offset += p.length;
-            }
+        // Locate the piece containing `pos` once; subsequent iterations stay
+        // at the same logical offset (`pos`), and after any whole-piece removal
+        // or trim-from-start the same `idx` already points at the next piece —
+        // there is no need to rescan from index 0 each time.
+        var offset: u32 = 0;
+        var idx: usize = 0;
+        while (idx < self.pieces.items.len) : (idx += 1) {
+            const p = self.pieces.items[idx];
+            if (pos < offset + p.length) break;
+            offset += p.length;
+        }
 
-            if (idx >= self.pieces.items.len) break;
-
+        while (remaining > 0 and idx < self.pieces.items.len) {
             const p = self.pieces.items[idx];
             const rel = pos - offset;
             const avail = p.length - rel;
             const to_delete = @min(remaining, avail);
 
             if (rel == 0 and to_delete == p.length) {
-                // Remove entire piece
+                // Remove entire piece. `idx` now points at the next piece, and
+                // `offset` is unchanged because we're still at the same byte
+                // position `pos` (the new piece at this idx starts there).
                 _ = self.pieces.orderedRemove(idx);
             } else if (rel == 0) {
-                // Trim from start
+                // Trim from start. This branch only fires when `to_delete <
+                // p.length`, which implies `to_delete == remaining`, so the
+                // loop terminates after this iteration — no index advance is
+                // needed.
                 self.pieces.items[idx] = Piece{
                     .source = p.source,
                     .start = p.start + to_delete,
                     .length = p.length - to_delete,
                 };
             } else if (rel + to_delete == p.length) {
-                // Trim from end
+                // Trim from end. The next byte to delete lives in the next piece.
                 self.pieces.items[idx] = Piece{
                     .source = p.source,
                     .start = p.start,
                     .length = rel,
                 };
+                offset += rel;
+                idx += 1;
             } else {
-                // Split: keep left and right, removing middle
+                // Split: keep left and right, removing middle. We've now
+                // consumed everything for this delete; the loop will exit.
                 const left = Piece{
                     .source = p.source,
                     .start = p.start,
@@ -226,10 +240,35 @@ pub const PieceTable = struct {
     }
 
     /// Get a single byte at a document offset.
+    ///
+    /// Uses a piece-index hint so sequential or nearby calls (UTF-8 cluster
+    /// scans, bracket matching, word-boundary walks) don't restart from
+    /// piece 0 each time. The hint is purely a read-cache — invalidated to
+    /// (0, 0) on every mutation by refreshCaches.
     pub fn byteAt(self: *const PieceTable, pos: u32) ?u8 {
-        var offset: u32 = 0;
-        for (self.pieces.items) |p| {
+        const items = self.pieces.items;
+        if (items.len == 0) return null;
+
+        // Try the hint piece first.
+        var start_idx: usize = self.hint_piece_idx;
+        var start_offset: u32 = self.hint_piece_offset;
+        if (start_idx >= items.len or start_offset > pos) {
+            // Hint is past the target or stale — restart from the beginning.
+            start_idx = 0;
+            start_offset = 0;
+        }
+
+        var offset: u32 = start_offset;
+        var idx: usize = start_idx;
+        while (idx < items.len) : (idx += 1) {
+            const p = items[idx];
             if (pos < offset + p.length) {
+                // Update the hint via @constCast — this is a read-only
+                // performance cache; the same pattern as cached_total_length
+                // / cached_line_count which are set in refreshCaches.
+                const mut = @constCast(self);
+                mut.hint_piece_idx = @intCast(idx);
+                mut.hint_piece_offset = offset;
                 return self.sourceByte(p, pos - offset);
             }
             offset += p.length;
@@ -313,6 +352,11 @@ pub const PieceTable = struct {
     }
 
     fn refreshCaches(self: *PieceTable) !void {
+        // Any mutation invalidates the byteAt hint — piece indices may have
+        // shifted from insert/delete/split.
+        self.hint_piece_idx = 0;
+        self.hint_piece_offset = 0;
+
         // Single pass: compute total length, line count, and line start offsets
         self.line_starts.clearRetainingCapacity();
         try self.line_starts.append(self.allocator, 0); // line 0 starts at byte 0
@@ -472,6 +516,23 @@ test "PieceTable: delete from beginning" {
     const content = try pt.getContent(std.testing.allocator);
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("world", content);
+}
+
+test "PieceTable: delete spanning many pieces" {
+    var pt = try PieceTable.initWithContent(std.testing.allocator, "abc");
+    defer pt.deinit();
+    // Build up a piece table with many small pieces in the middle.
+    try pt.insert(1, "1");
+    try pt.insert(2, "2");
+    try pt.insert(3, "3");
+    try pt.insert(4, "4");
+    try pt.insert(5, "5");
+    // Document should now be "a12345bc". Delete everything from index 1..7
+    // ("12345b"), which crosses several pieces.
+    try pt.delete(1, 6);
+    const content = try pt.getContent(std.testing.allocator);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("ac", content);
 }
 
 test "PieceTable: line operations" {

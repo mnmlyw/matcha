@@ -166,8 +166,20 @@ struct FileFinderView: View {
 
     private func scanFiles(root: String) -> [String] {
         let fm = FileManager.default
+        // Refuse to enumerate roots that would explode the search space (root
+        // filesystem, user home, /Applications, etc.). Without an open file
+        // the previous behavior could try to walk millions of paths.
+        let normalizedRoot = (root as NSString).standardizingPath
+        let dangerousRoots: Set<String> = [
+            "/", "/Users", "/Applications", "/Library", "/System", "/private",
+            NSHomeDirectory()
+        ]
+        if dangerousRoots.contains(normalizedRoot) { return [] }
+
         let rootURL = URL(fileURLWithPath: root)
         var results: [String] = []
+        // Hard cap on results so a misconfigured root can't OOM the app.
+        let maxFiles = 50_000
 
         let skipDirs: Set<String> = [
             ".git", ".hg", ".svn", "node_modules", ".zig-cache", "zig-out",
@@ -192,6 +204,7 @@ struct FileFinderView: View {
             if !isDir {
                 let relative = url.path.replacingOccurrences(of: root + "/", with: "")
                 results.append(relative)
+                if results.count >= maxFiles { break }
             }
         }
 

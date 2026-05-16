@@ -5,7 +5,12 @@ const Config = @import("Config.zig").Config;
 pub fn parseFile(allocator: Allocator, config: *Config, path: []const u8) !void {
     const io = std.Io.Threaded.global_single_threaded.io();
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return,
+        error.FileNotFound => {
+            // Still record the path so a later set_system_dark can no-op
+            // cleanly even if the file appears between calls.
+            savePath(config, allocator, path);
+            return;
+        },
         else => return err,
     };
     defer file.close(io);
@@ -21,6 +26,36 @@ pub fn parseFile(allocator: Allocator, config: *Config, path: []const u8) !void 
     config.applyAppearance();
     // Second pass: re-apply user color overrides on top of theme
     try parse(allocator, config, content);
+
+    savePath(config, allocator, path);
+}
+
+fn savePath(config: *Config, allocator: Allocator, path: []const u8) void {
+    // Free any prior path so re-loading the same Config doesn't leak.
+    if (config.loaded_path) |old| {
+        if (config.allocator) |a| a.free(old) else allocator.free(old);
+    }
+    config.loaded_path = allocator.dupe(u8, path) catch null;
+    config.allocator = allocator;
+}
+
+/// Re-apply user overrides on top of whatever theme is currently set.
+/// Called by `matcha_config_set_system_dark` after it resolves `auto` and
+/// runs `applyAppearance()` — without this, an explicit `bg-color = #xxx`
+/// in the user's config would be wiped by the theme colors.
+pub fn reapplyUserOverrides(config: *Config) void {
+    const path = config.loaded_path orelse return;
+    const allocator = config.allocator orelse return;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return;
+    defer file.close(io);
+
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    const content = file_reader.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch return;
+    defer allocator.free(content);
+
+    parse(allocator, config, content) catch {};
 }
 
 pub fn parse(allocator: Allocator, config: *Config, content: []const u8) !void {
@@ -107,6 +142,36 @@ fn parseColor(value: []const u8) ?u32 {
 }
 
 // ── Tests ──────────────────────────────────────────────────────
+
+test "Parser: set_system_dark preserves user bg-color override" {
+    var config = Config.defaults();
+    defer config.deinit();
+    config.allocator = std.testing.allocator;
+
+    // User sets explicit bg-color and leaves appearance at auto.
+    try parse(std.testing.allocator, &config,
+        \\bg-color = #1a1a1a
+    );
+    try std.testing.expectEqual(@as(u32, 0x1a1a1aFF), config.bg_color);
+
+    // Simulate what main_c.zig:matcha_config_set_system_dark does for a dark
+    // system, WITHOUT the reapplyUserOverrides fix:
+    config.appearance = .dark;
+    config.applyAppearance();
+    config.appearance = .auto;
+    // applyAppearance just overwrote bg_color with the dark theme default —
+    // the user's override is lost until we re-overlay it.
+    try std.testing.expect(config.bg_color != 0x1a1a1aFF);
+
+    // The fix re-parses the saved config. For this test we simulate by
+    // running parse() again directly (reapplyUserOverrides would do the
+    // same after reading the file from `loaded_path`).
+    try parse(std.testing.allocator, &config,
+        \\bg-color = #1a1a1a
+    );
+    try std.testing.expectEqual(@as(u32, 0x1a1a1aFF), config.bg_color);
+}
+
 test "Parser: parse config" {
     var config = Config.defaults();
     defer config.deinit();

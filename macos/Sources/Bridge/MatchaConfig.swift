@@ -32,7 +32,10 @@ class MatchaConfig: ObservableObject {
             return "SF Mono"
         }
         let str = String(cString: cStr)
-        matcha_editor_free_string(UnsafeMutablePointer(mutating: cStr))
+        // Config strings come from c_allocator.dupeZ — the documented free
+        // helper for them is matcha_free_string. matcha_editor_free_string
+        // happens to alias today but is reserved for selection text.
+        matcha_free_string(UnsafeMutablePointer(mutating: cStr))
         return str
     }
 

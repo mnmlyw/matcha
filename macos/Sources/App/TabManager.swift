@@ -29,6 +29,49 @@ class TabManager: ObservableObject {
         }
     }
 
+    /// Prompt the user once per unsaved tab across every TabManager.
+    /// Returns `true` if every prompt was resolved (saved or discarded),
+    /// `false` if any prompt was canceled. Caller should abort the quit
+    /// flow on `false`.
+    @MainActor
+    static func reviewAllUnsavedInteractively() -> Bool {
+        allInstances.removeAll(where: { $0.value == nil })
+        for ref in allInstances {
+            guard let manager = ref.value else { continue }
+            for tab in manager.tabs where tab.isModified {
+                if !TabManager.promptSaveOrDiscard(tab: tab) {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    @MainActor
+    private static func promptSaveOrDiscard(tab: Tab) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Do you want to save changes to \"\(tab.title)\"?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            if tab.editor.info.filename != nil {
+                return tab.editor.save()
+            } else {
+                let panel = NSSavePanel()
+                guard panel.runModal() == .OK, let url = panel.url else { return false }
+                return tab.editor.saveAs(path: url.path)
+            }
+        case .alertSecondButtonReturn:
+            return true  // Don't Save
+        default:
+            return false  // Cancel
+        }
+    }
+
     let config: MatchaConfig
     private var editorCancellables: [UUID: AnyCancellable] = [:]
 
@@ -74,8 +117,13 @@ class TabManager: ObservableObject {
     }
 
     private func observeEditor(_ editor: MatchaEditor, id: UUID) {
-        editorCancellables[id] = editor.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
+        // Only forward when the source editor is the active one. Previously
+        // every keystroke in any tab redrew every other tab's view via SwiftUI
+        // recomputation — a sizeable cost with many tabs open.
+        editorCancellables[id] = editor.objectWillChange.sink { [weak self, weak editor] _ in
+            guard let self, let editor else { return }
+            guard editor === self.activeTab?.editor else { return }
+            self.objectWillChange.send()
         }
     }
 

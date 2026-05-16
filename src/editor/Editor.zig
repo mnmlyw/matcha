@@ -438,6 +438,7 @@ pub const Editor = struct {
 
         const branched = try self.undo_stack.commit();
         self.markDirty(branched);
+        self.ensureCursorVisible();
     }
 
     pub fn deleteWordBackward(self: *Editor) !void {
@@ -781,8 +782,12 @@ pub const Editor = struct {
                         anchor_col_delta = -@as(i32, @intCast(delta));
                     }
                 } else {
-                    // Insert comment prefix + space
+                    // Insert comment prefix + space. Stack buffer is sized for
+                    // the longest prefix any supported language uses; assert so
+                    // a future addition is caught at runtime instead of silently
+                    // overflowing.
                     var insert_buf: [16]u8 = undefined;
+                    std.debug.assert(prefix.len + 1 <= insert_buf.len);
                     @memcpy(insert_buf[0..prefix.len], prefix);
                     insert_buf[prefix.len] = ' ';
                     const insert_text = insert_buf[0 .. prefix.len + 1];
@@ -1148,7 +1153,10 @@ pub const Editor = struct {
 
         if (end_pos <= start_pos) return null;
 
-        return self.buffer.getRange(self.allocator, start_pos, end_pos) catch null;
+        return self.buffer.getRange(self.allocator, start_pos, end_pos) catch |err| {
+            self.setLastError(err);
+            return null;
+        };
     }
 
     pub fn paste(self: *Editor, text: []const u8) !void {
@@ -1469,6 +1477,10 @@ pub const Editor = struct {
     pub fn undo(self: *Editor) !void {
         self.clearExtraCursors();
         const group = self.undo_stack.popUndo() orelse return;
+        // If any step below errors before the group is handed to the redo stack,
+        // free it here instead of leaking the popped allocation.
+        var handed_off = false;
+        errdefer if (!handed_off) self.undo_stack.freeGroup(group);
 
         // Apply inverse operations in reverse order
         var i: usize = group.ops.len;
@@ -1488,12 +1500,15 @@ pub const Editor = struct {
         self.modified = !self.save_reachable or self.current_version != self.save_version;
 
         try self.undo_stack.pushRedo(group);
+        handed_off = true;
         self.ensureCursorVisible();
     }
 
     pub fn redo(self: *Editor) !void {
         self.clearExtraCursors();
         const group = self.undo_stack.popRedo() orelse return;
+        var handed_off = false;
+        errdefer if (!handed_off) self.undo_stack.freeGroup(group);
 
         // Re-apply operations in forward order
         for (group.ops) |op| {
@@ -1519,6 +1534,7 @@ pub const Editor = struct {
         self.current_version += 1;
 
         try self.undo_stack.pushUndo(group);
+        handed_off = true;
         self.modified = !self.save_reachable or self.current_version != self.save_version;
         self.ensureCursorVisible();
     }
@@ -2061,9 +2077,12 @@ pub const Editor = struct {
         const line_len: u32 = @intCast(data.len);
         const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
 
-        // Pass 1: find wrap break points (cluster-aware)
-        var break_positions: [4096]u32 = undefined;
-        var num_breaks: u32 = 0;
+        // Pass 1: find the wrap-break position immediately preceding byte_col,
+        // plus the count of breaks at-or-before byte_col. We only need those
+        // two scalars — recording every break in a fixed-size stack array
+        // (previously [4096]u32) silently truncated very long single lines.
+        var segment: u32 = 0;
+        var seg_start: u32 = 0;
 
         if (wrap_width > 0) {
             var scan_pos: u32 = 0;
@@ -2075,21 +2094,18 @@ pub const Editor = struct {
 
             while (scan_pos < line_len) {
                 if (scan_x >= wrap_width and scan_x > 0) {
+                    const break_at: u32 = if (scan_has_space) scan_last_space else scan_pos;
+                    if (break_at <= byte_col) {
+                        seg_start = break_at;
+                        segment += 1;
+                    }
                     if (scan_has_space) {
-                        if (num_breaks < 4096) {
-                            break_positions[num_breaks] = scan_last_space;
-                            num_breaks += 1;
-                        }
                         scan_pos = scan_last_space;
                         scan_vcol = scan_last_space_vcol;
                         scan_x = 0;
                         scan_has_space = false;
                         continue;
                     } else {
-                        if (num_breaks < 4096) {
-                            break_positions[num_breaks] = scan_pos;
-                            num_breaks += 1;
-                        }
                         scan_x = 0;
                         scan_has_space = false;
                     }
@@ -2110,14 +2126,6 @@ pub const Editor = struct {
                 scan_vcol += cw;
                 scan_x += px_w;
             }
-        }
-
-        // Determine which segment byte_col falls in
-        var segment: u32 = 0;
-        var seg_start: u32 = 0;
-        while (segment < num_breaks and break_positions[segment] <= byte_col) {
-            seg_start = break_positions[segment];
-            segment += 1;
         }
 
         // Pass 2: measure pixel width (cluster-aware)

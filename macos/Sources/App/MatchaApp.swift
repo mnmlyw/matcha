@@ -139,13 +139,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func handleOpenDocuments(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
         guard let descriptorList = event.paramDescriptor(forKeyword: keyDirectObject) else { return }
-        for i in 1...descriptorList.numberOfItems {
+        // numberOfItems can be 0; `1...0` would trap.
+        let count = descriptorList.numberOfItems
+        guard count >= 1 else { return }
+        for i in 1...count {
             guard let descriptor = descriptorList.atIndex(i) else { continue }
-            // Try to coerce to file URL
+            // Try to coerce to file URL. `typeFileURL` data is a NUL-terminated
+            // C string; constructing a URL via `String(data:encoding:.utf8)`
+            // can fail or include trailing NUL bytes, so use NSURL's data init.
             if let urlDescriptor = descriptor.coerce(toDescriptorType: typeFileURL) {
                 let urlData = urlDescriptor.data
-                if let urlString = String(data: urlData, encoding: .utf8),
-                   let url = URL(string: urlString) {
+                if let url = NSURL(absoluteURLWithDataRepresentation: urlData, relativeTo: nil) as URL? {
                     openFilePath(url.path)
                 }
             }
@@ -173,10 +177,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "You have \(count) unsaved file\(count == 1 ? "" : "s")."
         alert.informativeText = "Your changes will be lost if you quit without saving."
-        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Review Unsaved…")
+        alert.addButton(withTitle: "Discard Changes")
         alert.addButton(withTitle: "Cancel")
-        let response = alert.runModal()
-        return response == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            // Prompt for each unsaved file. Any cancel aborts the quit.
+            return TabManager.reviewAllUnsavedInteractively() ? .terminateNow : .terminateCancel
+        case .alertSecondButtonReturn:
+            return .terminateNow
+        default:
+            return .terminateCancel
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

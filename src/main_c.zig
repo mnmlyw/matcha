@@ -76,6 +76,10 @@ export fn matcha_config_set_system_dark(cfg: ?*Config, is_dark: bool) void {
         c.appearance = if (is_dark) .dark else .light;
         c.applyAppearance();
         c.appearance = .auto; // restore so future calls still check system
+        // Re-overlay user color overrides — applyAppearance just clobbered
+        // every theme color, including any explicit `bg-color = …` etc. the
+        // user set in their config file.
+        Parser.reapplyUserOverrides(c);
     }
 }
 
@@ -393,6 +397,16 @@ export fn matcha_editor_get_cursor_offset(ed: ?*Editor) u32 {
     return e.cursorPos();
 }
 
+/// Monotonic counter bumped on every buffer mutation. Useful for invalidating
+/// Swift-side caches that mirror buffer contents (e.g. UTF-16 ↔ byte-offset
+/// conversions used by IME queries). Wraps on overflow, but the wrap window
+/// is large enough (2^32) that callers can treat any change in value as a
+/// signal to refetch.
+export fn matcha_editor_get_buffer_version(ed: ?*Editor) u32 {
+    const e = ed orelse return 0;
+    return e.edit_counter;
+}
+
 export fn matcha_editor_paste(ed: ?*Editor, text: ?[*]const u8, len: u32) void {
     const e = ed orelse return;
     const t = text orelse return;
@@ -484,6 +498,7 @@ const InputKey = extern struct {
 };
 
 const mod_shift: u32 = 1 << 0;
+const mod_ctrl: u32 = 1 << 1;
 const mod_alt: u32 = 1 << 2;
 const mod_super: u32 = 1 << 3;
 
@@ -491,9 +506,23 @@ fn hasModifier(modifiers: u32, flag: u32) bool {
     return (modifiers & flag) != 0;
 }
 
+/// True if `text` begins with a macOS private-use codepoint (NSEvent function/arrow
+/// keys live in U+F700–U+F8FF). Inserting these into the buffer would write garbage.
+fn textBeginsWithPrivateUse(text: []const u8) bool {
+    if (text.len < 3) return false;
+    const b0 = text[0];
+    const b1 = text[1];
+    const b2 = text[2];
+    if (b0 != 0xEF) return false;
+    if (b1 < 0x9C or b1 > 0xA3) return false; // U+F700..U+F8FF in UTF-8
+    _ = b2;
+    return true;
+}
+
 export fn matcha_editor_key_event(ed: ?*Editor, key: InputKey) bool {
     const e = ed orelse return false;
     const has_shift = hasModifier(key.modifiers, mod_shift);
+    const has_ctrl = hasModifier(key.modifiers, mod_ctrl);
     const has_alt = hasModifier(key.modifiers, mod_alt);
     const has_super = hasModifier(key.modifiers, mod_super);
     const text = if (key.text) |ptr| ptr[0..key.text_len] else "";
@@ -612,7 +641,10 @@ export fn matcha_editor_key_event(ed: ?*Editor, key: InputKey) bool {
         else => {},
     }
 
-    if (!has_super and text.len > 0) {
+    // Drop text payloads that come from Ctrl-modified keys (e.g. Ctrl+A → \x01)
+    // or from function/arrow keys whose `characters` value lives in the macOS
+    // private-use range (U+F700–U+F8FF). Both would otherwise corrupt the buffer.
+    if (!has_super and !has_ctrl and text.len > 0 and !textBeginsWithPrivateUse(text)) {
         e.insertText(text) catch |err| e.setLastError(err);
         return true;
     }
