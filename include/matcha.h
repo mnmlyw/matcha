@@ -17,6 +17,10 @@ typedef struct matcha_editor_s* matcha_editor_t;
 typedef struct {
     uint16_t keycode;
     uint32_t modifiers;
+    /// Borrowed pointer to `text_len` bytes. Valid ONLY for the duration of
+    /// the matcha_editor_key_event call — the implementation MUST copy any
+    /// bytes it needs to retain (e.g. into the undo buffer) before returning.
+    /// Callers may pass NULL when no text payload accompanies the event.
     const char* text;
     uint32_t text_len;
 } matcha_input_key_s;

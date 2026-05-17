@@ -731,6 +731,7 @@ pub const Editor = struct {
         }
 
         if (change_count > 0) {
+            self.undo_stack.setCursorAfter(self.cursor.line, self.cursor.col);
             const branched = try self.undo_stack.commit();
             self.markDirty(branched);
             self.invalidateCaches();
@@ -930,6 +931,10 @@ pub const Editor = struct {
 
         try self.undo_stack.record(.insert, insert_pos, insert_text);
         try self.buffer.insert(insert_pos, insert_text);
+        // Record post-cursor BEFORE commit so redo can land in the right
+        // place (the last-op-end fallback would put the cursor at the end
+        // of the inserted block, not at the moved-up cursor).
+        self.undo_stack.setCursorAfter(self.cursor.line - 1, self.cursor.col);
         const branched = try self.undo_stack.commit();
         self.markDirty(branched);
 
@@ -975,6 +980,7 @@ pub const Editor = struct {
 
         try self.undo_stack.record(.insert, insert_pos, insert_text);
         try self.buffer.insert(insert_pos, insert_text);
+        self.undo_stack.setCursorAfter(self.cursor.line + 1, self.cursor.col);
         const branched = try self.undo_stack.commit();
         self.markDirty(branched);
 
@@ -1540,8 +1546,13 @@ pub const Editor = struct {
             }
         }
 
-        // Move cursor to end of last operation
-        if (group.ops.len > 0) {
+        // Cursor placement: prefer the post-cursor captured at commit time.
+        // For moveLineUp/Down, dedent, and replaceAll the cursor ends up at
+        // a position unrelated to the last op's byte range; the legacy
+        // last-op-end fallback handles plain insert/delete cases.
+        if (group.has_post_cursor) {
+            self.cursor.moveTo(group.post_cursor_line, group.post_cursor_col);
+        } else if (group.ops.len > 0) {
             const last = group.ops[group.ops.len - 1];
             const end_pos = switch (last.kind) {
                 .insert => last.pos + @as(u32, @intCast(last.text.len)),
@@ -1978,6 +1989,7 @@ pub const Editor = struct {
         }
 
         if (count > 0) {
+            self.undo_stack.setCursorAfter(self.cursor.line, self.cursor.col);
             const branched = try self.undo_stack.commit();
             self.markDirty(branched);
             self.invalidateCaches();
@@ -3510,6 +3522,24 @@ test "Editor: byteColToPixelMetrics computes positions past former 4096-segment 
     const at_zero = ed.byteColToPixelMetrics(0, 0);
     try testing.expectEqual(@as(u32, 0), at_zero.segment);
     try testing.expectEqual(@as(f32, 0), at_zero.segment_x);
+}
+
+test "Editor: redo of moveLineDown lands cursor on moved line" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+    try ed.insertText("alpha\nbeta\ngamma");
+    // Cursor is now at end of "gamma" (line 2). Move to line 0.
+    ed.cursor.moveTo(0, 0);
+    try ed.moveLineDown();
+    // After moveLineDown, cursor is on line 1 (alpha now sits there).
+    try testing.expectEqual(@as(u32, 1), ed.cursor.line);
+    try ed.undo();
+    try testing.expectEqual(@as(u32, 0), ed.cursor.line);
+    try ed.redo();
+    // Without the post-cursor fix, redo would land at the byte position of
+    // the last op's end — typically wrong column.
+    try testing.expectEqual(@as(u32, 1), ed.cursor.line);
 }
 
 test "Editor: selectNextOccurrence guards against short content" {

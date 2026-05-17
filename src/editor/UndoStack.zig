@@ -14,9 +14,17 @@ pub const EditOp = struct {
 
 pub const EditGroup = struct {
     ops: []EditOp, // owned
-    /// Cursor position before the edit group
+    /// Cursor position before the edit group (used by undo)
     cursor_line: u32,
     cursor_col: u32,
+    /// Cursor position after the edit group (used by redo). For ops that
+    /// move the cursor in a way unrelated to the last op's byte range
+    /// (moveLineUp/Down, replaceAll, dedent), this is the only correct
+    /// place to land on redo — the last-op-end heuristic produces the
+    /// wrong column.
+    post_cursor_line: u32 = 0,
+    post_cursor_col: u32 = 0,
+    has_post_cursor: bool = false,
 };
 
 const GroupList = std.ArrayListUnmanaged(EditGroup);
@@ -29,6 +37,10 @@ pub const UndoStack = struct {
     current_ops: OpList,
     current_cursor_line: u32,
     current_cursor_col: u32,
+    /// Optional post-cursor for the in-progress group; consumed by commit().
+    current_post_cursor_line: u32 = 0,
+    current_post_cursor_col: u32 = 0,
+    has_current_post_cursor: bool = false,
 
     pub fn init(allocator: Allocator) UndoStack {
         return .{
@@ -81,6 +93,16 @@ pub const UndoStack = struct {
         }
     }
 
+    /// Record where the cursor should land if this group is later redone.
+    /// Call this AFTER the cursor has been moved to its final post-edit
+    /// position, BEFORE commit(). Only the most recent call wins; the
+    /// flag is reset by commit().
+    pub fn setCursorAfter(self: *UndoStack, line: u32, col: u32) void {
+        self.current_post_cursor_line = line;
+        self.current_post_cursor_col = col;
+        self.has_current_post_cursor = true;
+    }
+
     pub fn undoDepth(self: *const UndoStack) usize {
         return self.undo_stack.items.len;
     }
@@ -115,8 +137,12 @@ pub const UndoStack = struct {
             .ops = ops,
             .cursor_line = self.current_cursor_line,
             .cursor_col = self.current_cursor_col,
+            .post_cursor_line = self.current_post_cursor_line,
+            .post_cursor_col = self.current_post_cursor_col,
+            .has_post_cursor = self.has_current_post_cursor,
         });
         self.current_ops.clearRetainingCapacity();
+        self.has_current_post_cursor = false;
 
         // Clear redo stack on new edit
         const had_redo = self.redo_stack.items.len > 0;

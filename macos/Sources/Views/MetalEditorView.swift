@@ -109,6 +109,14 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         let newScale = Float(screen.backingScaleFactor)
         if newScale != r.scaleFactor {
             let scaledFont = NSFont(descriptor: font.fontDescriptor, size: font.pointSize * CGFloat(newScale)) ?? font
+            // Drain any in-flight command buffers before discarding the old
+            // renderer. Without this, a frame still being encoded against
+            // the prior renderer's textures / buffers can fault when those
+            // objects deallocate.
+            if let cmd = r.commandQueue.makeCommandBuffer() {
+                cmd.commit()
+                cmd.waitUntilCompleted()
+            }
             renderer = MetalRenderer(device: device, view: self, font: scaledFont,
                                      cellWidth: Float(cellWidth), cellHeight: Float(cellHeight),
                                      scaleFactor: newScale)
