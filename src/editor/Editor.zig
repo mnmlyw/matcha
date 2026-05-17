@@ -3461,3 +3461,88 @@ test "Editor: exact-fit wrapped CJK stays on one visual row" {
     try testing.expectEqual(@as(f32, 4), rect.x);
     try testing.expectEqual(@as(f32, 0), rect.y);
 }
+
+test "Editor: deleteBackward removes one CJK cluster on a long line" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // 200 CJK characters = 600 bytes (well past the 64-byte cluster window).
+    var line: [600]u8 = undefined;
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        @memcpy(line[i * 3 ..][0..3], "好");
+    }
+    try ed.insertText(&line);
+
+    const before = ed.buffer.totalLength();
+    try ed.deleteBackward();
+    // Exactly one 3-byte CJK codepoint (one cluster, no combining marks)
+    // should be removed regardless of line length.
+    try testing.expectEqual(before - 3, ed.buffer.totalLength());
+}
+
+test "Editor: byteColToPixelMetrics computes positions past former 4096-segment cap" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // Narrowest viewport (1 cell) so each character wraps to its own row,
+    // producing one segment per character. This forces more wrap breaks
+    // than the old [4096]u32 stack array could hold.
+    ed.setViewport(1, 10, 1, 1);
+
+    var line: [8000]u8 = undefined;
+    @memset(&line, 'x');
+    try ed.insertText(&line);
+
+    // A column well past the old 4096 cap must still produce a sensible
+    // (non-zero, non-negative) segment index and segment_x.
+    const metrics = ed.byteColToPixelMetrics(0, 6000);
+    try testing.expect(metrics.segment > 4096);
+    try testing.expect(metrics.segment_x >= 0);
+    try testing.expect(metrics.total_x > 0);
+
+    // Boundary: column 0 sits in segment 0 at x = 0.
+    const at_zero = ed.byteColToPixelMetrics(0, 0);
+    try testing.expectEqual(@as(u32, 0), at_zero.segment);
+    try testing.expectEqual(@as(f32, 0), at_zero.segment_x);
+}
+
+test "Editor: selectNextOccurrence guards against short content" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // Seed a multi-cursor word by selecting "foobar" in a longer buffer,
+    // then shrink the buffer below the word length and call again.
+    try ed.insertText("foobar foobar");
+    ed.setSelectionPosRange(0, 6);
+    try ed.selectNextOccurrence(); // captures "foobar" into multi_cursor_word
+    try testing.expect(ed.multi_cursor_word != null);
+
+    // Now wipe the buffer entirely — content < word length must not OOB.
+    ed.setSelectionPosRange(0, ed.buffer.totalLength());
+    try ed.deleteSelection();
+    try testing.expectEqual(@as(u32, 0), ed.buffer.totalLength());
+
+    // Should return without panicking on the bounded slice.
+    try ed.selectNextOccurrence();
+}
+
+test "Editor: deleteBackward removes a ZWJ flag cluster" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // U+1F1FA U+1F1F8 — regional indicator pair for the US flag, 8 bytes.
+    try ed.insertText("\u{1F1FA}\u{1F1F8}");
+    try testing.expectEqual(@as(u32, 8), ed.buffer.totalLength());
+
+    try ed.deleteBackward();
+    // The whole 8-byte cluster should be deleted as one grapheme.
+    try testing.expectEqual(@as(u32, 0), ed.buffer.totalLength());
+}

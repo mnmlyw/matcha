@@ -191,6 +191,36 @@ fn parseColor(value: []const u8) ?u32 {
 
 // ── Tests ──────────────────────────────────────────────────────
 
+test "Parser: parseFile + reapplyUserOverrides preserves user color after appearance switch" {
+    // Full round-trip: write a real file, parseFile (saves path),
+    // simulate set_system_dark (which calls applyAppearance + reapply),
+    // and confirm the user's override survives.
+    const path = "/tmp/matcha-test-config-roundtrip.cfg";
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cwd = std.Io.Dir.cwd();
+    const f = try cwd.createFile(io, path, .{});
+    var write_buf: [256]u8 = undefined;
+    var writer = f.writer(io, &write_buf);
+    try writer.interface.writeAll("bg-color = #1a1a1a\n");
+    try writer.interface.flush();
+    f.close(io);
+    defer cwd.deleteFile(io, path) catch {};
+
+    var config = Config.defaults();
+    defer config.deinit();
+    config.allocator = std.testing.allocator;
+    try parseFile(std.testing.allocator, &config, path);
+    try std.testing.expectEqual(@as(u32, 0x1a1a1aFF), config.bg_color);
+
+    // Simulate matcha_config_set_system_dark for a dark system.
+    config.appearance = .dark;
+    config.applyAppearance();
+    config.appearance = .auto;
+    try std.testing.expect(config.bg_color != 0x1a1a1aFF); // wiped by theme
+    reapplyUserOverrides(&config);
+    try std.testing.expectEqual(@as(u32, 0x1a1a1aFF), config.bg_color);
+}
+
 test "Parser: set_system_dark preserves user bg-color override" {
     var config = Config.defaults();
     defer config.deinit();

@@ -542,6 +542,95 @@ test "PieceTable: delete spanning many pieces" {
     try std.testing.expectEqualStrings("ac", content);
 }
 
+test "PieceTable: delete entire buffer in one call" {
+    var pt = try PieceTable.initWithContent(std.testing.allocator, "hello world");
+    defer pt.deinit();
+    try pt.insert(5, "-XYZ-");
+    // Now "hello-XYZ- world", len = 16. Delete all of it.
+    try pt.delete(0, pt.totalLength());
+    try std.testing.expectEqual(@as(u32, 0), pt.totalLength());
+    const content = try pt.getContent(std.testing.allocator);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("", content);
+}
+
+test "PieceTable: delete crossing whole-piece-removal + continuing" {
+    var pt = PieceTable.init(std.testing.allocator);
+    defer pt.deinit();
+    // Build a layout where deletion will entirely consume one piece and
+    // continue into the next.
+    try pt.insert(0, "AAA");
+    try pt.insert(3, "BBB");
+    try pt.insert(6, "CCC");
+    // "AAABBBCCC", len 9. Delete BBB and one byte of CCC (range [3, 7)).
+    try pt.delete(3, 4);
+    const content = try pt.getContent(std.testing.allocator);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("AAACC", content);
+}
+
+test "PieceTable: delete from end of one piece into start of next" {
+    var pt = PieceTable.init(std.testing.allocator);
+    defer pt.deinit();
+    try pt.insert(0, "abcd");
+    try pt.insert(4, "efgh");
+    try pt.insert(8, "ijkl");
+    // "abcdefghijkl", len 12. Delete [3, 9) → "abc" + "jkl" = "abcjkl".
+    try pt.delete(3, 6);
+    const content = try pt.getContent(std.testing.allocator);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("abcjkl", content);
+}
+
+test "PieceTable: byteAt hint survives mutation that invalidates it" {
+    var pt = try PieceTable.initWithContent(std.testing.allocator, "abcdef");
+    defer pt.deinit();
+    try pt.insert(3, "XYZ"); // "abcXYZdef"
+
+    // Warm the hint by accessing the last piece, then mutate, then access
+    // an earlier position. The hint must be invalidated so we don't read
+    // stale piece offsets.
+    try std.testing.expectEqual(@as(u8, 'f'), pt.byteAt(8).?);
+    try pt.insert(0, "@@"); // "@@abcXYZdef"
+    try std.testing.expectEqual(@as(u8, '@'), pt.byteAt(0).?);
+    try std.testing.expectEqual(@as(u8, 'X'), pt.byteAt(5).?);
+    try std.testing.expectEqual(@as(u8, 'f'), pt.byteAt(10).?);
+}
+
+test "PieceTable: byteAt hint handles backward access" {
+    var pt = PieceTable.init(std.testing.allocator);
+    defer pt.deinit();
+    try pt.insert(0, "AAA");
+    try pt.insert(3, "BBB");
+    try pt.insert(6, "CCC");
+    // "AAABBBCCC". Walk forward to warm the hint at piece 2, then access
+    // an earlier piece — the hint must reset rather than miss.
+    try std.testing.expectEqual(@as(u8, 'C'), pt.byteAt(7).?);
+    try std.testing.expectEqual(@as(u8, 'A'), pt.byteAt(1).?);
+    try std.testing.expectEqual(@as(u8, 'B'), pt.byteAt(4).?);
+    try std.testing.expectEqual(@as(u8, 'C'), pt.byteAt(8).?);
+}
+
+test "PieceTable: insert hint produces correct content over many forward inserts" {
+    var pt = PieceTable.init(std.testing.allocator);
+    defer pt.deinit();
+    // Simulate typing forward — every insertion is at the current end,
+    // which is exactly the access pattern the hint optimizes for.
+    var i: u32 = 0;
+    while (i < 64) : (i += 1) {
+        const ch: u8 = @intCast(@as(u32, 'a') + (i % 26));
+        const buf = [_]u8{ch};
+        try pt.insert(i, &buf);
+    }
+    try std.testing.expectEqual(@as(u32, 64), pt.totalLength());
+    const content = try pt.getContent(std.testing.allocator);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqual(@as(usize, 64), content.len);
+    // First/last byte sanity check.
+    try std.testing.expectEqual(@as(u8, 'a'), content[0]);
+    try std.testing.expectEqual(@as(u8, 'a' + (63 % 26)), content[63]);
+}
+
 test "PieceTable: line operations" {
     var pt = try PieceTable.initWithContent(std.testing.allocator, "line1\nline2\nline3");
     defer pt.deinit();
