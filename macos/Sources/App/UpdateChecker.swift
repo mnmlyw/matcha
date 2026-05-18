@@ -85,7 +85,8 @@ final class UpdateChecker {
     /// semver. Previously `compactMap { Int($0) }` silently dropped any
     /// segment containing a `-`, which produced wrong ordering for tags
     /// like `1.0.0-rc1` vs `1.0.0`.
-    private func isNewer(remote: String, local: String) -> Bool {
+    /// Internal (not private) so XCTest can exercise it directly.
+    func isNewer(remote: String, local: String) -> Bool {
         let rRelease = remote.split(separator: "-", maxSplits: 1).first.map(String.init) ?? remote
         let lRelease = local.split(separator: "-", maxSplits: 1).first.map(String.init) ?? local
         let rPre = remote.contains("-")

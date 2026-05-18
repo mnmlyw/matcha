@@ -263,6 +263,67 @@ pub fn build(b: *std.Build) void {
         app.dependOn(&fail_cmd.step);
     }
 
+    // ── Swift unit tests via XCTest ────────────────────────────
+    const swift_test = b.step("swift-test", "Run macOS Swift unit tests via XCTest");
+    if (isMacosTarget(target)) {
+        if (swiftArchName(target.result.cpu.arch)) |swift_arch_test| {
+            const min_version_test = formatSemver(b, macosMinVersion(target));
+            const swift_test_cmd = b.addSystemCommand(&.{
+                "sh", "-c",
+                \\set -e
+                \\SWIFT_TARGET=$1
+                \\SDK=$(xcrun --show-sdk-path)
+                \\PLATFORM=$(xcrun --show-sdk-platform-path -sdk macosx)
+                \\XCTEST_FRAMEWORKS="$PLATFORM/Developer/Library/Frameworks"
+                \\XCTEST_LIBS="$PLATFORM/Developer/usr/lib"
+                \\OUT=zig-out/swift-test
+                \\mkdir -p "$OUT"
+                \\ranlib -no_warning_for_no_symbols zig-out/lib/libmatcha.a 2>/dev/null || true
+                \\swiftc \
+                \\  -swift-version 5 \
+                \\  -sdk "$SDK" \
+                \\  -target "$SWIFT_TARGET" \
+                \\  -O \
+                \\  -I include \
+                \\  -I "$XCTEST_LIBS" \
+                \\  -L zig-out/lib \
+                \\  -L "$XCTEST_LIBS" \
+                \\  -lmatcha \
+                \\  -lXCTestSwiftSupport \
+                \\  -F "$XCTEST_FRAMEWORKS" \
+                \\  -framework XCTest \
+                \\  -framework AppKit \
+                \\  -framework SwiftUI \
+                \\  -framework Metal \
+                \\  -framework MetalKit \
+                \\  -framework CoreText \
+                \\  -framework CoreFoundation \
+                \\  -framework CoreGraphics \
+                \\  -Xlinker -rpath -Xlinker "$XCTEST_FRAMEWORKS" \
+                \\  -Xlinker -rpath -Xlinker "$XCTEST_LIBS" \
+                \\  -Xlinker -lc \
+                \\  -Xlinker -w \
+                \\  -o "$OUT/MatchaTests" \
+                \\  macos/Sources/App/UpdateChecker.swift \
+                \\  macos/Sources/App/TabManager.swift \
+                \\  macos/Sources/Bridge/MatchaConfig.swift \
+                \\  macos/Sources/Bridge/MatchaEditor.swift \
+                \\  macos/Tests/UpdateCheckerTests.swift \
+                \\  macos/Tests/MatchaEditorTests.swift \
+                \\  macos/Tests/MatchaConfigTests.swift \
+                \\  macos/Tests/TabManagerTests.swift \
+                \\  macos/Tests/main.swift
+                \\echo "Built $OUT/MatchaTests"
+                \\"$OUT/MatchaTests"
+                ,
+                "sh",
+            });
+            swift_test_cmd.addArg(b.fmt("{s}-apple-macosx{s}", .{ swift_arch_test, min_version_test }));
+            swift_test_cmd.step.dependOn(b.getInstallStep());
+            swift_test.dependOn(&swift_test_cmd.step);
+        }
+    }
+
     // ── Unit tests ─────────────────────────────────────────────
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
