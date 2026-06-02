@@ -303,6 +303,17 @@ pub const Editor = struct {
     fn insertTextWithOptions(self: *Editor, text: []const u8, allow_auto_pair: bool) !void {
         if (allow_auto_pair and try self.handleAutoPair(text)) return;
 
+        if (text.len == 0) {
+            if (self.selection.active) {
+                try self.deleteSelection();
+            } else if (!self.undo_stack.currentGroupEmpty()) {
+                const branched = try self.undo_stack.commit();
+                self.markDirty(branched);
+                self.ensureCursorVisible();
+            }
+            return;
+        }
+
         // If there's a selection, delete it first (as part of the same undo group)
         if (self.selection.active) {
             try self.deleteSelectionNoCommit();
@@ -375,6 +386,18 @@ pub const Editor = struct {
                     const b = self.buffer.byteAt(window_start) orelse break;
                     if ((b & 0xC0) != 0x80) break;
                     window_start += 1;
+                }
+
+                if (window_start > line_start) {
+                    const first_cp = self.buffer.codepointAt(window_start);
+                    const prev_cp_pos = self.buffer.prevCodepointStart(window_start);
+                    const prev_cp = if (prev_cp_pos < window_start) self.buffer.codepointAt(prev_cp_pos) else 0;
+                    if (UnicodeUtil.isClusterExtenderCp(first_cp) or
+                        prev_cp == 0x200D or
+                        (UnicodeUtil.isRegionalIndicatorCp(first_cp) and UnicodeUtil.isRegionalIndicatorCp(prev_cp)))
+                    {
+                        window_start = line_start;
+                    }
                 }
 
                 if (window_start >= pos) {
@@ -537,9 +560,11 @@ pub const Editor = struct {
     }
 
     fn insertNoCommit(self: *Editor, text: []const u8) !void {
+        if (text.len == 0) return;
         const pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
         try self.undo_stack.record(.insert, pos, text);
         try self.buffer.insert(pos, text);
+        self.invalidateCaches();
         for (text) |ch| {
             if (ch == '\n') {
                 self.cursor.line += 1;
@@ -2920,6 +2945,51 @@ test "Editor: undo/redo" {
     try testing.expectEqualStrings("hello", content);
 }
 
+test "Editor: empty insert is a no-op" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    const before_counter = ed.edit_counter;
+    try ed.insertText("");
+
+    try expectContent(&ed, "");
+    try testing.expectEqual(before_counter, ed.edit_counter);
+    try testing.expectEqual(@as(i64, 0), ed.current_version);
+    try testing.expect(!ed.modified);
+    try testing.expectEqual(@as(usize, 0), ed.undo_stack.undoDepth());
+}
+
+test "Editor: empty replace range is a no-op" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("abc");
+    const before_counter = ed.edit_counter;
+    const before_version = ed.current_version;
+    try ed.replaceRangeLiteral(1, 1, "");
+
+    try expectContent(&ed, "abc");
+    try testing.expectEqual(before_counter, ed.edit_counter);
+    try testing.expectEqual(before_version, ed.current_version);
+    try testing.expectEqual(@as(usize, 1), ed.undo_stack.undoDepth());
+}
+
+test "Editor: insertNoCommit invalidates mutation caches" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    _ = try ed.searchContent();
+    const before_counter = ed.edit_counter;
+    try ed.insertNoCommit("x");
+
+    try testing.expectEqual(before_counter + 1, ed.edit_counter);
+    const content = try ed.searchContent();
+    try testing.expectEqualStrings("x", content);
+}
+
 test "Editor: selection and get text" {
     const config = Config.defaults();
     var ed = Editor.init(testing.allocator, &config);
@@ -3574,5 +3644,25 @@ test "Editor: deleteBackward removes a ZWJ flag cluster" {
 
     try ed.deleteBackward();
     // The whole 8-byte cluster should be deleted as one grapheme.
+    try testing.expectEqual(@as(u32, 0), ed.buffer.totalLength());
+}
+
+test "Editor: deleteBackward removes long combining-mark cluster" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    var cluster: [1 + 80 * 2]u8 = undefined;
+    cluster[0] = 'e';
+    var i: usize = 0;
+    while (i < 80) : (i += 1) {
+        cluster[1 + i * 2] = 0xCC;
+        cluster[1 + i * 2 + 1] = 0x81;
+    }
+
+    try ed.insertText(&cluster);
+    try testing.expectEqual(@as(u32, @intCast(cluster.len)), ed.buffer.totalLength());
+
+    try ed.deleteBackward();
     try testing.expectEqual(@as(u32, 0), ed.buffer.totalLength());
 }

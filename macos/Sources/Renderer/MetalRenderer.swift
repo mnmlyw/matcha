@@ -5,6 +5,7 @@ import MatchaKit
 
 class MetalRenderer {
     private static let quadStride = MemoryLayout<QuadVertex>.stride
+    private static let atlasDimensionLimit = 8192
 
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
@@ -235,6 +236,7 @@ class MetalRenderer {
                                r: fgColor.r, g: fgColor.g, b: fgColor.b, a: fgColor.a)
             }
         }
+        ensureAtlasTexture()
         if let buffer = Self.uploadVertices(textQuads, device: device, into: &textVertexBuffer),
            let atlasTexture = glyphAtlasTexture
         {
@@ -321,6 +323,7 @@ class MetalRenderer {
                 ghostX += cellWidth
             }
 
+            ensureAtlasTexture()
             if let buffer = Self.uploadVertices(ghostQuads, device: device, into: &ghostVertexBuffer),
                let atlasTexture = glyphAtlasTexture
             {
@@ -382,6 +385,7 @@ class MetalRenderer {
             }
         }
 
+        ensureAtlasTexture()
         if let buffer = Self.uploadVertices(lineNumberQuads, device: device, into: &lineNumberVertexBuffer),
            let atlasTexture = glyphAtlasTexture
         {
@@ -491,6 +495,112 @@ class MetalRenderer {
             emojiDirtyMaxX = 0; emojiDirtyMaxY = 0
             emojiAtlasDirty = false
         }
+    }
+
+    private func growMonoAtlas(minWidth: Int, minHeight: Int) -> Bool {
+        let oldWidth = atlasWidth
+        let oldHeight = atlasHeight
+        var newWidth = oldWidth
+        var newHeight = oldHeight
+        let limit = Self.atlasDimensionLimit
+
+        while newWidth < minWidth && newWidth < limit {
+            newWidth = min(newWidth * 2, limit)
+        }
+        while newHeight < minHeight && newHeight < limit {
+            newHeight = min(newHeight * 2, limit)
+        }
+        guard newWidth >= minWidth, newHeight >= minHeight else { return false }
+        guard newWidth != oldWidth || newHeight != oldHeight else { return false }
+
+        let oldData = atlasData
+        var newData = [UInt8](repeating: 0, count: newWidth * newHeight)
+        for row in 0..<oldHeight {
+            let src = row * oldWidth
+            let dst = row * newWidth
+            newData[dst..<dst + oldWidth] = oldData[src..<src + oldWidth]
+        }
+
+        atlasWidth = newWidth
+        atlasHeight = newHeight
+        atlasData = newData
+
+        let xScale = Float(oldWidth) / Float(newWidth)
+        let yScale = Float(oldHeight) / Float(newHeight)
+        for key in Array(glyphCache.keys) {
+            guard var uv = glyphCache[key], !uv.isColor else { continue }
+            uv.uvX *= xScale
+            uv.uvW *= xScale
+            uv.uvY *= yScale
+            uv.uvH *= yScale
+            glyphCache[key] = uv
+        }
+
+        glyphAtlasTexture = nil
+        atlasDirty = true
+        atlasDirtyMinX = 0
+        atlasDirtyMinY = 0
+        atlasDirtyMaxX = atlasWidth
+        atlasDirtyMaxY = atlasHeight
+        return true
+    }
+
+    private func growEmojiAtlas(minWidth: Int, minHeight: Int) -> Bool {
+        let oldWidth = emojiAtlasWidth
+        let oldHeight = emojiAtlasHeight
+        var newWidth = oldWidth
+        var newHeight = oldHeight
+        let limit = Self.atlasDimensionLimit
+
+        while newWidth < minWidth && newWidth < limit {
+            newWidth = min(newWidth * 2, limit)
+        }
+        while newHeight < minHeight && newHeight < limit {
+            newHeight = min(newHeight * 2, limit)
+        }
+        guard newWidth >= minWidth, newHeight >= minHeight else { return false }
+        guard newWidth != oldWidth || newHeight != oldHeight else { return false }
+
+        let oldData = emojiAtlasData
+        let oldRowBytes = oldWidth * 4
+        let newRowBytes = newWidth * 4
+        var newData = [UInt8](repeating: 0, count: newWidth * newHeight * 4)
+        for row in 0..<oldHeight {
+            let src = row * oldRowBytes
+            let dst = row * newRowBytes
+            newData[dst..<dst + oldRowBytes] = oldData[src..<src + oldRowBytes]
+        }
+
+        emojiAtlasWidth = newWidth
+        emojiAtlasHeight = newHeight
+        emojiAtlasData = newData
+
+        let xScale = Float(oldWidth) / Float(newWidth)
+        let yScale = Float(oldHeight) / Float(newHeight)
+        for key in Array(glyphCache.keys) {
+            guard var uv = glyphCache[key], uv.isColor else { continue }
+            uv.uvX *= xScale
+            uv.uvW *= xScale
+            uv.uvY *= yScale
+            uv.uvH *= yScale
+            glyphCache[key] = uv
+        }
+        for key in Array(clusterGlyphCache.keys) {
+            guard var uv = clusterGlyphCache[key] else { continue }
+            uv.uvX *= xScale
+            uv.uvW *= xScale
+            uv.uvY *= yScale
+            uv.uvH *= yScale
+            clusterGlyphCache[key] = uv
+        }
+
+        emojiAtlasTexture = nil
+        emojiAtlasDirty = true
+        emojiDirtyMinX = 0
+        emojiDirtyMinY = 0
+        emojiDirtyMaxX = emojiAtlasWidth
+        emojiDirtyMaxY = emojiAtlasHeight
+        return true
     }
 
     // MARK: - Glyph Rasterization
@@ -622,14 +732,23 @@ class MetalRenderer {
         }
 
         // Always use color atlas for clusters (emoji)
+        if glyphW > emojiAtlasWidth {
+            _ = growEmojiAtlas(minWidth: glyphW, minHeight: emojiAtlasHeight)
+        }
+        if glyphW > emojiAtlasWidth {
+            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+        }
         if emojiCursorX + glyphW > emojiAtlasWidth {
             emojiCursorX = 0
             emojiCursorY += emojiRowHeight + 1
             emojiRowHeight = 0
         }
         if emojiCursorY + glyphH > emojiAtlasHeight {
-            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
-                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            if !growEmojiAtlas(minWidth: emojiAtlasWidth, minHeight: emojiCursorY + glyphH) {
+                return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                               bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            }
         }
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -684,17 +803,23 @@ class MetalRenderer {
 
     private func rasterizeMonoGlyph(codepoint: UInt32, renderFont: CTFont, glyphs: [CGGlyph],
                                      boundingRect: CGRect, glyphW: Int, glyphH: Int, padding: CGFloat) -> GlyphUV {
+        if glyphW > atlasWidth {
+            _ = growMonoAtlas(minWidth: glyphW, minHeight: atlasHeight)
+        }
+        if glyphW > atlasWidth {
+            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+        }
         if atlasCursorX + glyphW > atlasWidth {
             atlasCursorX = 0
             atlasCursorY += atlasRowHeight + 1
             atlasRowHeight = 0
         }
-        // Atlas full — return an empty UV WITHOUT caching it, so a subsequent
-        // frame (after a hypothetical eviction or atlas resize) can retry.
-        // Caching here would make the loss permanent.
         if atlasCursorY + glyphH > atlasHeight {
-            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
-                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            if !growMonoAtlas(minWidth: atlasWidth, minHeight: atlasCursorY + glyphH) {
+                return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                               bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            }
         }
 
         let colorSpace = CGColorSpaceCreateDeviceGray()
@@ -756,15 +881,23 @@ class MetalRenderer {
 
     private func rasterizeColorGlyph(codepoint: UInt32, renderFont: CTFont, glyphs: [CGGlyph],
                                       boundingRect: CGRect, glyphW: Int, glyphH: Int, padding: CGFloat) -> GlyphUV {
+        if glyphW > emojiAtlasWidth {
+            _ = growEmojiAtlas(minWidth: glyphW, minHeight: emojiAtlasHeight)
+        }
+        if glyphW > emojiAtlasWidth {
+            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+        }
         if emojiCursorX + glyphW > emojiAtlasWidth {
             emojiCursorX = 0
             emojiCursorY += emojiRowHeight + 1
             emojiRowHeight = 0
         }
-        // See rasterizeMonoGlyph: don't cache empty UV on atlas overflow.
         if emojiCursorY + glyphH > emojiAtlasHeight {
-            return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
-                           bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            if !growEmojiAtlas(minWidth: emojiAtlasWidth, minHeight: emojiCursorY + glyphH) {
+                return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
+                               bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+            }
         }
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()

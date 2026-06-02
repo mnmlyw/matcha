@@ -53,6 +53,27 @@ final class MatchaEditorTests: XCTestCase {
         XCTAssertEqual(editor.getContent(), "ac")
     }
 
+    func testReplaceRangeEmptyNoOpKeepsContentCacheFresh() {
+        editor.insert(text: "abc")
+        XCTAssertEqual(editor.getContentCached(), "abc")
+
+        editor.replaceRange(start: 1, end: 1, text: "")
+
+        XCTAssertEqual(editor.getContentCached(), "abc")
+        XCTAssertEqual(editor.getCursorOffset(), 1)
+    }
+
+    func testContentCacheRefetchesAfterMutations() {
+        editor.insert(text: "abc")
+        XCTAssertEqual(editor.getContentCached(), "abc")
+
+        editor.replaceRange(start: 1, end: 2, text: "X")
+        XCTAssertEqual(editor.getContentCached(), "aXc")
+
+        editor.newFile()
+        XCTAssertEqual(editor.getContentCached(), "")
+    }
+
     // MARK: - Selection offsets
 
     func testSelectionOffsetsRoundTrip() {

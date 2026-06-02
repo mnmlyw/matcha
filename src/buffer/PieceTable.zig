@@ -433,6 +433,7 @@ pub const PieceTable = struct {
 
     /// Get content in a byte range. Walks pieces directly (O(pieces + range)).
     pub fn getRange(self: *const PieceTable, allocator: Allocator, start: u32, end: u32) ![]u8 {
+        if (start > end or end > self.totalLength()) return error.InvalidRange;
         const len = end - start;
         const buf = try allocator.alloc(u8, len);
         self.copyRange(start, end, buf);
@@ -441,6 +442,8 @@ pub const PieceTable = struct {
 
     /// Copy content in a byte range into a caller-provided buffer.
     pub fn copyRange(self: *const PieceTable, start: u32, end: u32, dest: []u8) void {
+        std.debug.assert(start <= end);
+        std.debug.assert(end <= self.totalLength());
         const len = end - start;
         std.debug.assert(dest.len >= len);
 
@@ -644,4 +647,54 @@ test "PieceTable: line operations" {
     const lc = pt.posToLineCol(8);
     try std.testing.expectEqual(@as(u32, 1), lc.line);
     try std.testing.expectEqual(@as(u32, 2), lc.col);
+}
+
+test "PieceTable: invalid ranges are rejected" {
+    var pt = try PieceTable.initWithContent(std.testing.allocator, "abc");
+    defer pt.deinit();
+
+    try std.testing.expectError(error.InvalidRange, pt.getRange(std.testing.allocator, 2, 1));
+    try std.testing.expectError(error.InvalidRange, pt.getRange(std.testing.allocator, 0, 4));
+}
+
+test "PieceTable: randomized edits match contiguous model" {
+    var pt = PieceTable.init(std.testing.allocator);
+    defer pt.deinit();
+
+    var model: std.ArrayListUnmanaged(u8) = .empty;
+    defer model.deinit(std.testing.allocator);
+
+    var state: u32 = 0xC0FFEE;
+    var step: u32 = 0;
+    while (step < 300) : (step += 1) {
+        state = state *% 1664525 +% 1013904223;
+        const op = state % 3;
+
+        if (op == 0 or model.items.len == 0) {
+            state = state *% 1664525 +% 1013904223;
+            const pos: usize = if (model.items.len == 0) 0 else state % (model.items.len + 1);
+            state = state *% 1664525 +% 1013904223;
+            const len: usize = 1 + (state % 8);
+            var buf: [8]u8 = undefined;
+            var i: usize = 0;
+            while (i < len) : (i += 1) {
+                state = state *% 1664525 +% 1013904223;
+                buf[i] = @as(u8, 'a') + @as(u8, @intCast(state % 26));
+            }
+            try pt.insert(@intCast(pos), buf[0..len]);
+            try model.insertSlice(std.testing.allocator, pos, buf[0..len]);
+        } else {
+            state = state *% 1664525 +% 1013904223;
+            const pos: usize = state % model.items.len;
+            state = state *% 1664525 +% 1013904223;
+            const max_len = model.items.len - pos;
+            const len: usize = 1 + (state % max_len);
+            try pt.delete(@intCast(pos), @intCast(len));
+            model.replaceRange(std.testing.allocator, pos, len, &.{}) catch unreachable;
+        }
+
+        const content = try pt.getContent(std.testing.allocator);
+        defer std.testing.allocator.free(content);
+        try std.testing.expectEqualSlices(u8, model.items, content);
+    }
 }

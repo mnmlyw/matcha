@@ -143,6 +143,14 @@ fn isExtender(cp: u32) bool {
     return false;
 }
 
+pub fn isClusterExtenderCp(cp: u32) bool {
+    return isExtender(cp);
+}
+
+pub fn isRegionalIndicatorCp(cp: u32) bool {
+    return cp >= 0x1F1E6 and cp <= 0x1F1FF;
+}
+
 fn extenderForcesWide(cp: u32) bool {
     if (cp == 0xFE0F or cp == 0x20E3) return true;
     if (cp >= 0x1F3FB and cp <= 0x1F3FF) return true;

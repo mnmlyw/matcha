@@ -10,6 +10,30 @@ const default_macos_min_version = std.SemanticVersion{
     .patch = 0,
 };
 
+const zig_fmt_paths = [_][]const u8{
+    "build.zig",
+    "src/buffer/PieceTable.zig",
+    "src/buffer/UnicodeIterator.zig",
+    "src/editor/Cursor.zig",
+    "src/editor/Selection.zig",
+    "src/editor/UndoStack.zig",
+    "src/editor/Editor.zig",
+    "src/font/Metrics.zig",
+    "src/font/Atlas.zig",
+    "src/main_c.zig",
+    "src/render/Cell.zig",
+    "src/render/RenderState.zig",
+    "src/main.zig",
+    "src/input/Keybind.zig",
+    "src/input/Key.zig",
+    "src/highlight/Language.zig",
+    "src/highlight/Lexer.zig",
+    "src/highlight/TokenType.zig",
+    "src/config/Parser.zig",
+    "src/config/Config.zig",
+    "pkg/macos/text.zig",
+};
+
 fn isMacosTarget(target: std.Build.ResolvedTarget) bool {
     if (target.query.os_tag) |tag| return tag == .macos;
     return target.result.os.tag == .macos;
@@ -263,6 +287,14 @@ pub fn build(b: *std.Build) void {
         app.dependOn(&fail_cmd.step);
     }
 
+    // ── Formatting check ──────────────────────────────────────
+    const fmt_check = b.step("fmt-check", "Check Zig source formatting");
+    const fmt_cmd = b.addSystemCommand(&.{ "zig", "fmt", "--check" });
+    for (zig_fmt_paths) |path| {
+        fmt_cmd.addArg(path);
+    }
+    fmt_check.dependOn(&fmt_cmd.step);
+
     // ── Swift unit tests via XCTest ────────────────────────────
     const swift_test = b.step("swift-test", "Run macOS Swift unit tests via XCTest");
     if (isMacosTarget(target)) {
@@ -347,6 +379,12 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_tests.step);
+
+    const check = b.step("check", "Run format checks, Zig tests, Swift tests, and app build");
+    check.dependOn(fmt_check);
+    check.dependOn(test_step);
+    check.dependOn(swift_test);
+    check.dependOn(app);
 
     // ── Run step (convenience) ─────────────────────────────────
     const run = b.step("run", "Build and run Matcha.app");

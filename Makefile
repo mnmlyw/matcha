@@ -1,4 +1,4 @@
-.PHONY: lib app run test swift-test clean
+.PHONY: lib app run test swift-test fmt-check check clean
 
 lib:
 	zig build
@@ -14,6 +14,12 @@ test:
 
 swift-test: lib
 	zig build swift-test
+
+fmt-check:
+	zig build fmt-check
+
+check:
+	zig build check
 
 clean:
 	rm -rf zig-out .zig-cache
