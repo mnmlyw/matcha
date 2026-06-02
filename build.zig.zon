@@ -1,6 +1,6 @@
 .{
     .name = .matcha,
-    .version = "0.5.3",
+    .version = "0.5.4",
     .fingerprint = 0x98a71109acc14702,
     .minimum_zig_version = "0.16.0",
     .paths = .{
