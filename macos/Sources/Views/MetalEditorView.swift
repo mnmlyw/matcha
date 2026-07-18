@@ -12,6 +12,8 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     var keyWindowObserver: NSObjectProtocol?
     var screenChangeObserver: NSObjectProtocol?
     var occlusionObserver: NSObjectProtocol?
+    private var coreRenderDirty = true
+    private var resizeWorkItem: DispatchWorkItem?
 
     // Font metrics (in points)
     var cellWidth: CGFloat = 8.4
@@ -38,13 +40,8 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         let fontSize = CGFloat(matcha_config_get_float(editor.config.handle, "font-size"))
         let size = fontSize > 0 ? fontSize : 14.0
 
-        if let cfFamily = matcha_config_get_string(editor.config.handle, "font-family") {
-            let family = String(cString: cfFamily)
-            matcha_free_string(UnsafeMutablePointer(mutating: cfFamily))
-            self.font = NSFont(name: family, size: size) ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-        } else {
-            self.font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-        }
+        self.font = NSFont(name: editor.config.fontFamily, size: size)
+            ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
 
         super.init(frame: .zero, device: MTLCreateSystemDefaultDevice())
 
@@ -88,6 +85,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     deinit {
         cursorBlinkTimer?.invalidate()
         inlineHintWorkItem?.cancel()
+        resizeWorkItem?.cancel()
         if let observer = keyWindowObserver {
             NotificationCenter.default.removeObserver(observer)
             keyWindowObserver = nil
@@ -196,11 +194,16 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        updateViewport()
-        // Force immediate redraw during resize to avoid stale frame stretching
+        resizeWorkItem?.cancel()
         if inLiveResize {
-            self.draw()
+            let item = DispatchWorkItem { [weak self] in
+                self?.updateViewport()
+                self?.requestRedraw()
+            }
+            resizeWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50), execute: item)
         } else {
+            updateViewport()
             requestRedraw()
         }
     }
@@ -212,6 +215,8 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
+        resizeWorkItem?.cancel()
+        updateViewport()
         requestRedraw()
     }
 
@@ -286,7 +291,8 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         editor.setHangulCellWidth(Float(hangulCellWidth))
     }
 
-    private func requestRedraw() {
+    private func requestRedraw(coreDirty: Bool = true) {
+        if coreDirty { coreRenderDirty = true }
         needsDisplay = true
     }
 
@@ -482,13 +488,26 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     // MARK: - MTKViewDelegate
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        updateViewport()
-        requestRedraw()
+        if inLiveResize {
+            resizeWorkItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                self?.updateViewport()
+                self?.requestRedraw()
+            }
+            resizeWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50), execute: item)
+        } else {
+            updateViewport()
+            requestRedraw()
+        }
     }
 
     func draw(in view: MTKView) {
-        editor.prepareRender()
-        renderer?.draw(in: view, editor: editor, cursorVisible: cursorVisible, inlineHint: inlineHint)
+        let rebuildGeometry = coreRenderDirty
+        if rebuildGeometry { editor.prepareRender() }
+        renderer?.draw(in: view, editor: editor, cursorVisible: cursorVisible,
+                       inlineHint: inlineHint, rebuildGeometry: rebuildGeometry)
+        coreRenderDirty = false
     }
 
     // MARK: - Cursor Blink
@@ -508,7 +527,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         }
         cursorBlinkTimer = Timer.scheduledTimer(withTimeInterval: 0.53, repeats: true) { [weak self] _ in
             self?.cursorVisible.toggle()
-            self?.requestRedraw()
+            self?.requestRedraw(coreDirty: false)
         }
     }
 

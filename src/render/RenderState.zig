@@ -93,7 +93,10 @@ const LineTokenCache = struct {
         self.entries.ensureTotalCapacity(allocator, line_count) catch {
             self.cached_line_count = 0;
             self.cached_language = lang;
-            self.cached_edit_counter = edit_counter;
+            // Keep the counter stale so the next render retries allocation.
+            // Recording the new counter with an empty entries array would let
+            // lineTokens index entries[line] out of bounds below.
+            self.cached_edit_counter = 0xFFFFFFFF;
             return;
         };
 
@@ -331,16 +334,37 @@ pub const RenderState = struct {
             var last_space_col: u32 = 0;
             var last_space_vcol: u32 = 0;
             var cells_at_space: usize = 0;
+            var cluster_bytes_at_space: usize = 0;
             var has_space_in_seg = false;
+            var horizontal_truncated = false;
 
             while (col < content_len) {
+                // Non-wrapped lines do not need cells beyond the right edge.
+                // This bounds the common long-line case to the visible prefix
+                // instead of walking megabytes that cannot produce geometry.
+                if (!wrap_enabled and seg_x_offset - editor.scroll_x + gutter_w > vp_w + cell_w) {
+                    horizontal_truncated = true;
+                    break;
+                }
                 // Check if we need to wrap
                 if (wrap_enabled and seg_x_offset >= wrap_width and seg_x_offset > 0) {
                     if (has_space_in_seg) {
                         // Truncate cells emitted after the last space, rewind to that point
                         self.cells.shrinkRetainingCapacity(cells_at_space);
+                        self.cluster_strings.shrinkRetainingCapacity(cluster_bytes_at_space);
                         col = last_space_col;
                         vcol = last_space_vcol;
+                        // Token lookup is monotonic during the normal walk;
+                        // rewinding bytes must rewind it too or the first
+                        // token(s) on the continuation row lose highlighting.
+                        token_idx = 0;
+                        if (tokens) |toks| {
+                            while (token_idx < toks.len and
+                                toks[token_idx].start + toks[token_idx].len <= col)
+                            {
+                                token_idx += 1;
+                            }
+                        }
                     }
                     seg_x_offset = 0;
                     last_seg += 1;
@@ -357,14 +381,10 @@ pub const RenderState = struct {
                 const cw = editor.visualWidthForClusterAt(line_data, col, vcol);
                 const char_px_w = editor.pixelWidthForClusterAt(line_data, col, vcol);
 
-                // For multi-codepoint clusters, store bytes and encode as special glyph_index
+                // Multi-codepoint cluster bytes are materialized only for a
+                // visible cell below; offscreen clusters do not need renderer
+                // payloads.
                 var glyph_index: u32 = codepoint;
-                if (is_cluster) {
-                    const offset: u32 = @intCast(self.cluster_strings.items.len);
-                    self.cluster_strings.appendSlice(self.allocator, line_data[col .. col + cluster_len]) catch {};
-                    self.cluster_strings.append(self.allocator, 0) catch {}; // null terminator
-                    glyph_index = CLUSTER_SENTINEL + offset;
-                }
 
                 // Compute visual position
                 const seg = last_seg;
@@ -377,6 +397,12 @@ pub const RenderState = struct {
                     seg_x_offset - editor.scroll_x + gutter_w;
 
                 if (y + cell_h >= 0 and y <= vp_h and x + char_px_w >= 0 and x <= vp_w) {
+                    if (is_cluster) {
+                        const offset: u32 = @intCast(self.cluster_strings.items.len);
+                        self.cluster_strings.appendSlice(self.allocator, line_data[col .. col + cluster_len]) catch {};
+                        self.cluster_strings.append(self.allocator, 0) catch {};
+                        glyph_index = CLUSTER_SENTINEL + offset;
+                    }
                     var bg_color = config.bg_color;
 
                     // Selection highlight
@@ -420,6 +446,7 @@ pub const RenderState = struct {
                     last_space_col = col + cluster_len;
                     last_space_vcol = vcol + cw;
                     cells_at_space = self.cells.items.len;
+                    cluster_bytes_at_space = self.cluster_strings.items.len;
                 }
 
                 col += cluster_len;
@@ -434,7 +461,8 @@ pub const RenderState = struct {
                 var indent_bytes: u32 = 0;
                 var indent_vcol: u32 = 0;
                 while (indent_bytes < content_len and
-                    (line_data[indent_bytes] == ' ' or line_data[indent_bytes] == '\t'))
+                    (line_data[indent_bytes] == ' ' or line_data[indent_bytes] == '\t') and
+                    (wrap_enabled or @as(f32, @floatFromInt(indent_vcol)) * cell_w - editor.scroll_x <= vp_w))
                 {
                     indent_vcol += editor.visualWidthForClusterAt(line_data, indent_bytes, indent_vcol);
                     indent_bytes += 1;
@@ -464,7 +492,9 @@ pub const RenderState = struct {
                 while (trail_end > 0 and (line_data[trail_end - 1] == ' ' or line_data[trail_end - 1] == '\t')) {
                     trail_end -= 1;
                 }
-                if (trail_end > 0 and trail_end < content_len) {
+                if (trail_end > 0 and trail_end < content_len and
+                    (!horizontal_truncated or trail_end < col))
+                {
                     const trail_metrics = editor.byteColToPixelMetricsWithData(line_data, trail_end);
                     var trail_pos = trail_end;
                     var trail_vcol = editor.byteColToVisualColWithData(line_data, trail_end);
@@ -694,6 +724,7 @@ pub const RenderState = struct {
         lang: Language,
     ) !*const LineTokenCacheEntry {
         const idx: usize = @intCast(line);
+        if (idx >= self.line_token_cache.entries.items.len) return error.TokenCacheUnavailable;
         const entry = &self.line_token_cache.entries.items[idx];
         if (!entry.valid) {
             const line_bytes = try self.lineBytes(editor, line);

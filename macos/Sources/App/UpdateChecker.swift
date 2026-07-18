@@ -69,7 +69,7 @@ final class UpdateChecker {
         let response = alert.runModal()
         switch response {
         case .alertFirstButtonReturn:
-            if let downloadURL = URL(string: url) {
+            if let downloadURL = URL(string: url), UpdateChecker.isValidDownloadURL(downloadURL) {
                 NSWorkspace.shared.open(downloadURL)
             }
         case .alertThirdButtonReturn:
@@ -77,6 +77,16 @@ final class UpdateChecker {
         default:
             break
         }
+    }
+
+    /// The release API response is untrusted input -- this gate ensures the
+    /// "Download" button only ever opens an https://github.com URL, never
+    /// whatever scheme/host a compromised API response or repo takeover
+    /// might substitute (which could otherwise launch an arbitrary
+    /// URL-scheme handler on the user's machine).
+    /// Internal (not private) so XCTest can exercise it directly.
+    static func isValidDownloadURL(_ url: URL) -> Bool {
+        url.scheme == "https" && url.host == "github.com"
     }
 
     /// Semver comparison: returns true if remote > local.

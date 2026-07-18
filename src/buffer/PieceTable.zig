@@ -15,6 +15,22 @@ pub const Piece = struct {
 const PieceList = std.ArrayListUnmanaged(Piece);
 const ByteBuffer = std.ArrayListUnmanaged(u8);
 
+/// Piece offsets/lengths (including positions into `add_buffer`) are u32,
+/// and `add_buffer` only ever grows -- deleted text's bytes remain in it,
+/// so even a long session of heavy typing and deleting accumulates toward
+/// this bound, not just the document's current visible size. Capped well
+/// below u32::MAX so no downstream arithmetic (total-length sums, the
+/// narrowing cast to u32 at the C ABI boundary) can ever overflow, while
+/// staying far above any legitimate document size (file open itself is
+/// capped at 100 MB).
+const MAX_DOCUMENT_LENGTH: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+/// Uses a saturating add so an absurd `additional` value (e.g. usize max)
+/// can never wrap the comparison around to a false negative.
+fn wouldExceedMaxDocumentLength(current_add_buffer_len: usize, additional: usize) bool {
+    return current_add_buffer_len +| additional > MAX_DOCUMENT_LENGTH;
+}
+
 pub const PieceTable = struct {
     allocator: Allocator,
     original: []const u8,
@@ -42,11 +58,18 @@ pub const PieceTable = struct {
     }
 
     pub fn initWithContent(allocator: Allocator, content: []const u8) !PieceTable {
+        const owned = try allocator.dupe(u8, content);
+        return initWithOwnedContent(allocator, owned);
+    }
+
+    /// Initialize from an allocator-owned buffer without copying it. Ownership
+    /// transfers immediately, including on error.
+    pub fn initWithOwnedContent(allocator: Allocator, content: []u8) !PieceTable {
         var pt = init(allocator);
+        errdefer pt.deinit();
+        pt.original = content;
+        pt.original_owned = true;
         if (content.len > 0) {
-            const owned = try allocator.dupe(u8, content);
-            pt.original = owned;
-            pt.original_owned = true;
             try pt.pieces.append(allocator, .{
                 .source = .original,
                 .start = 0,
@@ -80,12 +103,28 @@ pub const PieceTable = struct {
     pub fn insert(self: *PieceTable, pos: u32, text: []const u8) !void {
         if (text.len == 0) return;
 
+        if (wouldExceedMaxDocumentLength(self.add_buffer.items.len, text.len)) {
+            return error.DocumentTooLarge;
+        }
+
+        // Reserve every allocation the mutation can require before changing
+        // visible state. Once this preflight succeeds, the piece edit and line
+        // cache update below are allocation-free and therefore cannot leave a
+        // half-applied insert on OOM.
+        var newline_count: usize = 0;
+        for (text) |b| if (b == '\n') {
+            newline_count += 1;
+        };
+        try self.add_buffer.ensureUnusedCapacity(self.allocator, text.len);
+        try self.pieces.ensureUnusedCapacity(self.allocator, 2);
+        try self.line_starts.ensureUnusedCapacity(self.allocator, newline_count + @intFromBool(self.line_starts.items.len == 0));
+
         const add_start: u32 = @intCast(self.add_buffer.items.len);
-        try self.add_buffer.appendSlice(self.allocator, text);
+        self.add_buffer.appendSliceAssumeCapacity(text);
 
         if (self.pieces.items.len == 0) {
-            try self.pieces.append(self.allocator, .{ .source = .add, .start = add_start, .length = @intCast(text.len) });
-            try self.applyInsertToLineCache(pos, text);
+            self.pieces.appendAssumeCapacity(.{ .source = .add, .start = add_start, .length = @intCast(text.len) });
+            self.applyInsertToLineCache(pos, text);
             return;
         }
 
@@ -126,7 +165,7 @@ pub const PieceTable = struct {
             const prev = &self.pieces.items[ci];
             if (prev.source == .add and prev.start + prev.length == add_start) {
                 prev.length += @intCast(text.len);
-                try self.applyInsertToLineCache(pos, text);
+                self.applyInsertToLineCache(pos, text);
                 return;
             }
         }
@@ -139,8 +178,8 @@ pub const PieceTable = struct {
 
         if (idx >= self.pieces.items.len) {
             // Append at end
-            try self.pieces.append(self.allocator, new_piece);
-            try self.applyInsertToLineCache(pos, text);
+            self.pieces.appendAssumeCapacity(new_piece);
+            self.applyInsertToLineCache(pos, text);
             return;
         }
 
@@ -149,10 +188,10 @@ pub const PieceTable = struct {
 
         if (rel == 0) {
             // Insert before this piece
-            try self.pieces.insert(self.allocator, idx, new_piece);
+            self.pieces.insertAssumeCapacity(idx, new_piece);
         } else if (rel == p.length) {
             // Insert after this piece
-            try self.pieces.insert(self.allocator, idx + 1, new_piece);
+            self.pieces.insertAssumeCapacity(idx + 1, new_piece);
         } else {
             // Split the piece
             const left = Piece{
@@ -167,15 +206,20 @@ pub const PieceTable = struct {
             };
             // Replace current with left, insert new_piece and right
             self.pieces.items[idx] = left;
-            try self.pieces.insert(self.allocator, idx + 1, new_piece);
-            try self.pieces.insert(self.allocator, idx + 2, right);
+            self.pieces.insertAssumeCapacity(idx + 1, new_piece);
+            self.pieces.insertAssumeCapacity(idx + 2, right);
         }
-        try self.applyInsertToLineCache(pos, text);
+        self.applyInsertToLineCache(pos, text);
     }
 
     /// Delete `len` bytes starting at byte offset `pos`.
     pub fn delete(self: *PieceTable, pos: u32, len: u32) !void {
         if (len == 0) return;
+
+        // A middle-of-piece delete may need one extra Piece for the right
+        // remainder. Reserve it before any trims/removals so OOM cannot leave
+        // a partially deleted document.
+        try self.pieces.ensureUnusedCapacity(self.allocator, 1);
 
         var remaining = len;
 
@@ -235,7 +279,7 @@ pub const PieceTable = struct {
                     .length = p.length - rel - to_delete,
                 };
                 self.pieces.items[idx] = left;
-                try self.pieces.insert(self.allocator, idx + 1, right);
+                self.pieces.insertAssumeCapacity(idx + 1, right);
             }
 
             remaining -= to_delete;
@@ -409,12 +453,12 @@ pub const PieceTable = struct {
     ///    (entries exactly at `pos` stay put — the inserted text extends
     ///    that line forward rather than moving its start), and
     /// 2. splice in any new line starts introduced by newlines in `text`.
-    fn applyInsertToLineCache(self: *PieceTable, pos: u32, text: []const u8) !void {
+    fn applyInsertToLineCache(self: *PieceTable, pos: u32, text: []const u8) void {
         self.hint_piece_idx = 0;
         self.hint_piece_offset = 0;
 
         if (self.line_starts.items.len == 0) {
-            try self.line_starts.append(self.allocator, 0);
+            self.line_starts.appendAssumeCapacity(0);
         }
 
         self.cached_total_length = (self.cached_total_length orelse 0) + @as(u32, @intCast(text.len));
@@ -429,13 +473,12 @@ pub const PieceTable = struct {
 
         for (self.line_starts.items[lo..]) |*s| s.* += @intCast(text.len);
 
-        var new_starts: std.ArrayListUnmanaged(u32) = .empty;
-        defer new_starts.deinit(self.allocator);
+        var insert_idx = lo;
         for (text, 0..) |b, i| {
-            if (b == '\n') try new_starts.append(self.allocator, pos + @as(u32, @intCast(i)) + 1);
-        }
-        if (new_starts.items.len > 0) {
-            try self.line_starts.insertSlice(self.allocator, lo, new_starts.items);
+            if (b == '\n') {
+                self.line_starts.insertAssumeCapacity(insert_idx, pos + @as(u32, @intCast(i)) + 1);
+                insert_idx += 1;
+            }
         }
 
         self.cached_line_count = @intCast(self.line_starts.items.len);
@@ -748,6 +791,23 @@ test "PieceTable: insert hint produces correct content over many forward inserts
     try std.testing.expectEqual(@as(u8, 'a' + (63 % 26)), content[63]);
 }
 
+test "wouldExceedMaxDocumentLength stays under the cap" {
+    try std.testing.expect(!wouldExceedMaxDocumentLength(0, 100));
+    try std.testing.expect(!wouldExceedMaxDocumentLength(MAX_DOCUMENT_LENGTH - 5, 5));
+}
+
+test "wouldExceedMaxDocumentLength trips right at the cap" {
+    try std.testing.expect(wouldExceedMaxDocumentLength(MAX_DOCUMENT_LENGTH - 5, 6));
+    try std.testing.expect(wouldExceedMaxDocumentLength(MAX_DOCUMENT_LENGTH, 1));
+}
+
+test "wouldExceedMaxDocumentLength never wraps around on an absurd additional value" {
+    // A saturating add must clamp to usize's max instead of wrapping back
+    // under the cap, which would otherwise let a bogus huge insert through.
+    try std.testing.expect(wouldExceedMaxDocumentLength(100, std.math.maxInt(usize)));
+    try std.testing.expect(wouldExceedMaxDocumentLength(std.math.maxInt(usize), std.math.maxInt(usize)));
+}
+
 test "PieceTable: sequential forward inserts coalesce into a single piece" {
     var pt = PieceTable.init(std.testing.allocator);
     defer pt.deinit();
@@ -865,4 +925,3 @@ test "PieceTable: randomized edits match contiguous model" {
         }
     }
 }
-

@@ -8,10 +8,13 @@ will drift as files change.
 Suggested fix order: S1 → S2 → S4 → P1 → P4 → S3 → S5 → P2 → P3 → P5, then the
 rest opportunistically.
 
-**Status (2026-07-17):** S1, S2, S3, S4, S5, P1, P2, P3, P4, P5 fixed and
-verified (Zig unit tests, Swift XCTest suite via `zig build swift-test`, and
-`zig build app`). Each fix has regression tests that were confirmed to fail
-against the pre-fix code and pass against the fix. Notable follow-on
+**Status (2026-07-18):** All listed findings S1–S15, P1–P20, and X1 have been
+addressed and verified (`zig build test`, the 49-test Swift XCTest suite via
+`zig build swift-test`, and `zig build app`). S13's repository-controllable
+release posture now requires ReleaseSafe, Developer ID signing, hardened
+runtime, notarization, and stapling; App Sandbox remains a separately scoped
+compatibility project because CLI-opened paths and project-wide file search
+need a security-scoped-access design. Notable follow-on
 findings from the fix work itself:
 - P4's Swift-side fix and S3's ABI-backed byte↔UTF-16 conversion together
   eliminated full-buffer fetches in `selectedRange`, `markedRange`,
@@ -82,7 +85,7 @@ findings from the fix work itself:
   range-capped (1–32).
   **Fix:** clamp to a sane range (e.g. 4–256) and reject non-finite values.
 
-- [ ] **S6. Clipboard truncates at embedded NUL; `matcha_free_string` frees with understated length**
+- [x] **S6. Clipboard truncates at embedded NUL; `matcha_free_string` frees with understated length**
   `macos/Sources/Bridge/MatchaEditor.swift:196` — `String(cString:)` stops at
   the first NUL, so copying a selection spanning `\0` loses everything after
   it. `src/main_c.zig:434-446` — `matcha_free_string` uses `std.mem.span`
@@ -94,7 +97,7 @@ findings from the fix work itself:
 
 ### Low
 
-- [ ] **S7. Safety-checked `@intCast` panics reachable from the C ABI**
+- [x] **S7. Safety-checked `@intCast` panics reachable from the C ABI**
   `src/main_c.zig:383` (`out_len.* = @intCast(content.len)`) and the render
   getters at `:732, :740, :804, :812, :820, :828, :837` — buffers can grow past
   4 GiB via paste (open is capped at 100 MB but growth is unbounded); the u32
@@ -103,7 +106,7 @@ findings from the fix work itself:
   **Fix:** cap buffer growth, or return an error/0 on overflow instead of
   `@intCast`.
 
-- [ ] **S8. UpdateChecker opens release URL with no scheme/host validation**
+- [x] **S8. UpdateChecker opens release URL with no scheme/host validation**
   `macos/Sources/App/UpdateChecker.swift:44-57, 71-74` — `html_url` from the
   GitHub API JSON goes to `NSWorkspace.shared.open` unchecked; a hostile value
   (repo takeover / API compromise) could launch an arbitrary URL-scheme
@@ -111,14 +114,14 @@ findings from the fix work itself:
   download, 24 h throttle).
   **Fix:** require `scheme == "https" && host == "github.com"` before opening.
 
-- [ ] **S9. FileFinder relative-path computed with replace-all, not prefix strip**
+- [x] **S9. FileFinder relative-path computed with replace-all, not prefix strip**
   `macos/Sources/Views/FileFinderView.swift:205` —
   `replacingOccurrences(of: root + "/", with: "")` removes *every* occurrence.
   Root `/a/b` containing `/a/b/mirror/a/b/x.txt` yields `mirror/x.txt`, and
   `open()` (`:158`) then opens/creates a different file than selected.
   **Fix:** `hasPrefix` + `dropFirst`.
 
-- [ ] **S10. Grouped ops lack rollback; failed `commit` leaves `current_ops` populated (OOM-gated)**
+- [x] **S10. Grouped ops lack rollback; failed `commit` leaves `current_ops` populated (OOM-gated)**
   `src/editor/UndoStack.zig:128-145` + `src/editor/Editor.zig` —
   `toggleComment`, `duplicateLine`, `moveLineUp`, `moveLineDown`,
   `handleAutoPair` don't roll back on mid-loop allocation failure (unlike
@@ -128,7 +131,7 @@ findings from the fix work itself:
   **Fix:** mirror the `insertTab` rollback + `discardCurrentGroup()` pattern;
   clear `current_ops` on commit failure.
 
-- [ ] **S11. Token-cache OOM path leads to out-of-bounds index**
+- [x] **S11. Token-cache OOM path leads to out-of-bounds index**
   `src/render/RenderState.zig:75-80` + `:669-670` — if `invalidate`'s
   `ensureTotalCapacity` fails it returns with `entries` empty but records the
   `edit_counter`; `lineTokens` then indexes `entries.items[line]` unchecked →
@@ -136,14 +139,14 @@ findings from the fix work itself:
   **Fix:** don't record the edit counter on failure, or bounds-check in
   `lineTokens`.
 
-- [ ] **S12. Multi-cursor undo restores cursor to the wrong position**
+- [x] **S12. Multi-cursor undo restores cursor to the wrong position**
   `src/editor/Editor.zig:594, :1323` — `setCursorBefore(primary)` only latches
   while `current_ops` is empty, but the first extra cursor's
   `deleteSelectionNoCommit` overwrites it before any op is recorded. Undo of a
   multi-cursor edit lands on whichever extra cursor was processed first.
   **Fix:** latch the primary cursor before any per-cursor processing begins.
 
-- [ ] **S13. App hardening posture (informational)**
+- [x] **S13. App hardening posture (informational)**
   No `.entitlements`, no App Sandbox, no hardened runtime; release is ad-hoc
   signed (`codesign --sign -`); `CFBundleDocumentTypes` claims
   `public.data`/`public.item` (`macos/Matcha-Info.plist:60-62`). Any bug
@@ -152,14 +155,14 @@ findings from the fix work itself:
   **Fix (long-term):** Developer ID signing + notarization + hardened runtime;
   consider sandboxing.
 
-- [ ] **S14. Config load errors silently swallowed**
+- [x] **S14. Config load errors silently swallowed**
   `macos/Sources/Bridge/MatchaConfig.swift:15` discards the result of
   `matcha_config_load_file`; `src/main_c.zig:35` collapses all parse errors to
   `false`. A >1 MB or unreadable config silently falls back to defaults.
   **Fix:** surface a one-time notice (status bar / alert) when the config
   fails to load.
 
-- [ ] **S15. `PieceTable.byteAt` mutates shared hint state via `@constCast` (documented footgun)**
+- [x] **S15. `PieceTable.byteAt` mutates shared hint state via `@constCast` (documented footgun)**
   `src/buffer/PieceTable.zig:270-283` — read-path queries write
   `hint_piece_idx`/`hint_piece_offset`; safe single-threaded (verified), but
   any future off-main-thread ABI call yields torn hints → wrong bytes
@@ -223,7 +226,7 @@ findings from the fix work itself:
 
 ### Medium
 
-- [ ] **P6. Completions are O(file) with per-word allocs, synchronous per keystroke**
+- [x] **P6. Completions are O(file) with per-word allocs, synchronous per keystroke**
   `src/editor/Editor.zig:1456-1525` (full `getContent` copy + whole-file word
   scan + dupe of every seen word), extra copy in `src/main_c.zig:466-475`,
   driven synchronously from every handled key while the popup is open
@@ -231,7 +234,7 @@ findings from the fix work itself:
   **Fix:** maintain an incremental word index, or scan a bounded window and/or
   move the query off the key-handling path.
 
-- [ ] **P7. No dirty tracking: cursor blink re-runs the full render pipeline at ~2 Hz**
+- [x] **P7. No dirty tracking: cursor blink re-runs the full render pipeline at ~2 Hz**
   `macos/Sources/Views/MetalEditorView.swift:460-477` (0.53 s timer →
   `requestRedraw`), `src/editor/Editor.zig:2038` (`prepareRender`
   unconditionally recomputes) — every blink tick regenerates all viewport
@@ -240,14 +243,14 @@ findings from the fix work itself:
   **Fix:** track dirty state; on blink-only ticks update just the cursor
   uniform/quad.
 
-- [ ] **P8. No CPU/GPU frame synchronization on shared buffers**
+- [x] **P8. No CPU/GPU frame synchronization on shared buffers**
   `macos/Sources/Renderer/MetalRenderer.swift:406-439` (uploadVertices),
   `:452-467, :481-497` (texture `replace`), `:336-338` (commit without wait) —
   each frame overwrites the same `.storageModeShared` buffers/textures the
   previous in-flight frame may still read → flicker/garbled quads under load.
   **Fix:** in-flight semaphore with double/triple-buffered vertex buffers.
 
-- [ ] **P9. Glyph atlas: no eviction; when full, per-frame CoreText re-rasterization forever**
+- [x] **P9. Glyph atlas: no eviction; when full, per-frame CoreText re-rasterization forever**
   `macos/Sources/Renderer/MetalRenderer.swift:500-604` (append-only growth to
   8192², freed space never reclaimed; 64 MB gray + 256 MB RGBA CPU copies),
   `:638-645, :809-823` (rasterization failure deliberately not cached) — once
@@ -256,7 +259,7 @@ findings from the fix work itself:
   **Fix:** cache failures as "missing" sentinel; add LRU eviction or atlas
   reset-and-repack on fill.
 
-- [ ] **P10. Per-frame cost is O(longest visible line), not O(viewport)**
+- [x] **P10. Per-frame cost is O(longest visible line), not O(viewport)**
   `src/render/RenderState.zig:309-401, :434-487`;
   `src/editor/Editor.zig:2135-2208` — the per-line loop measures every cluster
   to end-of-line even far past the right edge, and cursor/bracket/trailing-WS
@@ -265,7 +268,7 @@ findings from the fix work itself:
   **Fix:** early-exit the cluster walk once past the visible right edge (plus
   cursor position); cache line-prefix metrics between frames.
 
-- [ ] **P11. FileFinder fuzzy filter runs on the main thread over 50k paths per keystroke**
+- [x] **P11. FileFinder fuzzy filter runs on the main thread over 50k paths per keystroke**
   `macos/Sources/Views/FileFinderView.swift:17-31` (computed property:
   lowercase-allocate + match + sort of the whole list), re-evaluated per
   keystroke, per body render, per arrow-key event (`:108`), per selection
@@ -273,13 +276,13 @@ findings from the fix work itself:
   **Fix:** cache lowercased paths once, debounce + filter off-main-thread,
   memoize results per query string.
 
-- [ ] **P12. Unbounded undo history**
+- [x] **P12. Unbounded undo history**
   `src/editor/UndoStack.zig:128-154` — no depth or byte cap; large
   paste/replaceAll groups are retained forever → session memory grows without
   bound.
   **Fix:** cap by total bytes and/or group count, dropping oldest.
 
-- [ ] **P13. Word-wrap rewind desyncs syntax coloring on wrapped rows**
+- [x] **P13. Word-wrap rewind desyncs syntax coloring on wrapped rows**
   `src/render/RenderState.zig:311-321` (rewind), `:364-376` (`token_idx`
   monotonic), `:336-339` — on a word-boundary wrap the cells rewind but the
   token index doesn't, so multi-token wrapped words lose highlighting at the
@@ -290,34 +293,34 @@ findings from the fix work itself:
 
 ### Low
 
-- [ ] **P14. `search_content_cache` retains a full document copy indefinitely**
+- [x] **P14. `search_content_cache` retains a full document copy indefinitely**
   `src/editor/Editor.zig:2600-2612` — one Cmd-F in a 100 MB file permanently
   doubles resident memory for that tab. **Fix:** free/shrink after the find
   session ends.
 
-- [ ] **P15. `selectNextOccurrence`/`getCompletions` allocate fresh full copies**
+- [x] **P15. `selectNextOccurrence`/`getCompletions` allocate fresh full copies**
   `src/editor/Editor.zig:1245, :1476` — instead of reusing the
   `searchContent` cache built for this purpose (`:2600`).
 
-- [ ] **P16. `openFile` holds 2× file size transiently**
+- [x] **P16. `openFile` holds 2× file size transiently**
   `src/editor/Editor.zig:179-182` + `src/buffer/PieceTable.zig:44-58` —
   content is read, then `initWithContent` dupes it before the first copy is
   freed. **Fix:** have `initWithContent` take ownership.
 
-- [ ] **P17. `ensureCursorVisible` allocates a full line copy per keystroke/movement**
+- [x] **P17. `ensureCursorVisible` allocates a full line copy per keystroke/movement**
   `src/editor/Editor.zig:2123-2132, :2845-2877` — O(line) alloc+scan on every
   edit and arrow key; pathological on huge single-line files.
 
-- [ ] **P18. Per-frame allocations for multi-codepoint cluster cells**
+- [x] **P18. Per-frame allocations for multi-codepoint cluster cells**
   `macos/Sources/Renderer/MetalRenderer.swift:629-636` — null-scan + Array
   copy + String decode + dict lookup per visible cluster cell per frame
   (offsets are unstable across frames). **Fix:** stable cluster IDs from the
   Zig side, or per-frame memo keyed on offset.
 
-- [ ] **P19. `MatchaConfig.fontFamily` does dupeZ + copy + free per property access**
+- [x] **P19. `MatchaConfig.fontFamily` does dupeZ + copy + free per property access**
   `macos/Sources/Bridge/MatchaConfig.swift:29-40`. **Fix:** cache in Swift.
 
-- [ ] **P20. `src/font/Atlas.zig` is dead code**
+- [x] **P20. `src/font/Atlas.zig` is dead code**
   Fixed 1024², no growth/eviction, unreachable from the app
   (`src/main_c.zig:845`). Remove or finish before wiring up.
 
@@ -325,7 +328,7 @@ findings from the fix work itself:
 
 ## Process
 
-- [ ] **X1. Documented release flow builds Debug**
+- [x] **X1. Documented release flow builds Debug**
   `AGENTS.md` release process runs `zig build app` with no `-Doptimize`;
   `b.standardOptimizeOption` defaults to Debug (safety checks + Debug-speed
   Zig). `build.zig:134` marks Debug builds `0.0.0-dev`, so a mistake is

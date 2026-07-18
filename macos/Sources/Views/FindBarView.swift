@@ -115,6 +115,7 @@ struct FindBarView: View {
         }
         .onDisappear {
             liveSearchWorkItem?.cancel()
+            editor.clearSearchCache()
         }
     }
 

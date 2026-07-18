@@ -39,6 +39,16 @@ final class MatchaEditorTests: XCTestCase {
         XCTAssertEqual(editor.getSelectionText(), "好")
     }
 
+    /// Regression test: getSelectionText used to decode with String(cString:),
+    /// which stops at the first NUL byte and silently truncated a selection
+    /// spanning an embedded NUL. It now decodes using the explicit length
+    /// the ABI returns.
+    func testGetSelectionTextPreservesEmbeddedNUL() {
+        editor.insert(text: "a\0b")
+        editor.setSelectionOffsets(start: 0, end: 3)
+        XCTAssertEqual(editor.getSelectionText(), "a\0b")
+    }
+
     // MARK: - replaceRange
 
     func testReplaceRangeInMiddle() {

@@ -47,4 +47,33 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertFalse(checker.isNewer(remote: "1.0", local: "1.0.0"))
         XCTAssertFalse(checker.isNewer(remote: "1.0.0", local: "1.0"))
     }
+
+    // MARK: - Download URL validation (security: the release API response is untrusted)
+
+    func testValidDownloadURLAcceptsGitHubReleasePage() {
+        let url = URL(string: "https://github.com/mnmlyw/matcha/releases/tag/v1.0.0")!
+        XCTAssertTrue(UpdateChecker.isValidDownloadURL(url))
+    }
+
+    func testValidDownloadURLRejectsNonHTTPSScheme() {
+        let url = URL(string: "file:///etc/passwd")!
+        XCTAssertFalse(UpdateChecker.isValidDownloadURL(url))
+    }
+
+    func testValidDownloadURLRejectsCustomURLScheme() {
+        // A malicious/compromised API response substituting an arbitrary
+        // URL-scheme handler must not be opened.
+        let url = URL(string: "myapp://evil-action")!
+        XCTAssertFalse(UpdateChecker.isValidDownloadURL(url))
+    }
+
+    func testValidDownloadURLRejectsLookalikeHost() {
+        let url = URL(string: "https://github.com.evil.example/release")!
+        XCTAssertFalse(UpdateChecker.isValidDownloadURL(url))
+    }
+
+    func testValidDownloadURLRejectsGitHubSubdomainSpoof() {
+        let url = URL(string: "https://github.com.attacker.io")!
+        XCTAssertFalse(UpdateChecker.isValidDownloadURL(url))
+    }
 }

@@ -142,8 +142,12 @@ void matcha_editor_select_word_left(matcha_editor_t ed);
 void matcha_editor_select_word_right(matcha_editor_t ed);
 
 // Clipboard
-/// Returns a malloc'd string the caller must free with matcha_free_string, or NULL if no selection.
-char* matcha_editor_get_selection_text(matcha_editor_t ed);
+/// Returns a malloc'd byte string the caller must free with
+/// matcha_editor_free_string(result, len), or NULL if no selection. `len`
+/// must be non-NULL and receives the exact byte length --
+/// decode using it rather than treating the result as NUL-terminated, since a
+/// selection may contain embedded NUL bytes.
+char* matcha_editor_get_selection_text(matcha_editor_t ed, uint32_t* len);
 char* matcha_editor_get_content(matcha_editor_t ed, uint32_t* len);
 bool matcha_editor_get_selection_offsets(matcha_editor_t ed, uint32_t* start, uint32_t* end);
 uint32_t matcha_editor_get_cursor_offset(matcha_editor_t ed);
@@ -202,6 +206,7 @@ bool matcha_editor_find_next_with_options(matcha_editor_t ed, const char* query,
                                            bool case_sensitive, bool whole_word);
 bool matcha_editor_find_prev_with_options(matcha_editor_t ed, const char* query, uint32_t len,
                                            bool case_sensitive, bool whole_word);
+void matcha_editor_clear_search_cache(matcha_editor_t ed);
 bool matcha_editor_replace_next(matcha_editor_t ed, const char* query, uint32_t q_len,
                                  const char* replacement, uint32_t r_len);
 bool matcha_editor_replace_next_with_options(matcha_editor_t ed, const char* query, uint32_t q_len,
@@ -226,17 +231,16 @@ const matcha_render_rect_s* matcha_editor_get_selections(matcha_editor_t ed, uin
 const matcha_render_rect_s* matcha_editor_get_line_number_cells(matcha_editor_t ed, uint32_t* count);
 const matcha_render_line_number_s* matcha_editor_get_line_number_labels(matcha_editor_t ed, uint32_t* count);
 
-const uint8_t* matcha_editor_get_atlas_data(matcha_editor_t ed,
-                                             uint32_t* width, uint32_t* height);
-bool matcha_editor_atlas_needs_update(matcha_editor_t ed);
-void matcha_editor_atlas_clear_dirty(matcha_editor_t ed);
-
 // Info
 matcha_editor_info_s matcha_editor_get_info(matcha_editor_t ed);
 
 // Memory management
-void matcha_editor_free_string(char* str);   // free strings from matcha_editor_get_selection_text
+void matcha_editor_free_string(char* str, uint32_t len); // free editor byte strings using their exact length
 void matcha_free_string(char* str);          // generic string free (also works for config strings)
+
+// Threading contract: all matcha_editor_* calls for a given editor must be
+// made on the same (main/UI) thread. Editor read paths maintain mutable lookup
+// hints and are not safe to race with other reads or mutations.
 
 #ifdef __cplusplus
 }

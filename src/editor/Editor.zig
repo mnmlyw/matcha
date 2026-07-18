@@ -88,6 +88,9 @@ pub const Editor = struct {
     // Search cache: contiguous buffer snapshot for repeated find operations
     search_content_cache: std.ArrayListUnmanaged(u8) = .empty,
     search_cache_edit_counter: u32 = 0xFFFFFFFF,
+    // Reused by cursor metric queries so arrow keys/typing do not allocate a
+    // fresh full-line copy on every ensureCursorVisible call.
+    metrics_line_scratch: std.ArrayListUnmanaged(u8) = .empty,
 
     pub fn init(allocator: Allocator, config: *const Config) Editor {
         return .{
@@ -107,6 +110,7 @@ pub const Editor = struct {
         self.render_state.deinit();
         self.wrap_prefix_sums.deinit(self.allocator);
         self.search_content_cache.deinit(self.allocator);
+        self.metrics_line_scratch.deinit(self.allocator);
         self.extra_cursors.deinit(self.allocator);
         if (self.multi_cursor_word) |w| self.allocator.free(w);
         if (self.filename_z) |z| self.allocator.free(z);
@@ -140,6 +144,17 @@ pub const Editor = struct {
         // to a single line set this back to that line right after calling
         // this function.
         self.wrap_dirty_line = null;
+    }
+
+    /// Commit an edit group, restoring the buffer and clearing the group if
+    /// allocating the undo entry fails. This keeps OOM from leaving an
+    /// untracked mutation or stale operations that contaminate the next edit.
+    fn commitUndoGroup(self: *Editor) !bool {
+        return self.undo_stack.commit() catch |err| {
+            self.undo_stack.rollbackCurrentGroup(&self.buffer);
+            self.invalidateCaches();
+            return err;
+        };
     }
 
     pub fn setLastError(self: *Editor, err: anyerror) void {
@@ -178,6 +193,7 @@ pub const Editor = struct {
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
         self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
         self.wrap_dirty_line = null;
+        self.clearSearchCache();
         if (self.filename_z) |z| self.allocator.free(z);
         self.filename_z = null;
         if (self.filename_owned) {
@@ -194,9 +210,11 @@ pub const Editor = struct {
         var read_buf: [64 * 1024]u8 = undefined;
         var file_reader = file.reader(io, &read_buf);
         const content = try file_reader.interface.allocRemaining(self.allocator, .limited(100 * 1024 * 1024)); // 100MB max
-        defer self.allocator.free(content);
 
-        var new_buffer = try PieceTable.initWithContent(self.allocator, content);
+        // Transfer the read buffer directly into the piece table. The prior
+        // initWithContent path duplicated the entire file and briefly held two
+        // full copies during every open.
+        var new_buffer = try PieceTable.initWithOwnedContent(self.allocator, content);
         errdefer new_buffer.deinit();
         const new_filename = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(new_filename);
@@ -224,6 +242,7 @@ pub const Editor = struct {
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
         self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
         self.wrap_dirty_line = null;
+        self.clearSearchCache();
         self.filename = new_filename;
         self.filename_owned = true;
         if (self.filename_z) |z| self.allocator.free(z);
@@ -399,7 +418,7 @@ pub const Editor = struct {
             if (self.selection.active) {
                 try self.deleteSelection();
             } else if (!self.undo_stack.currentGroupEmpty()) {
-                const branched = try self.undo_stack.commit();
+                const branched = try self.commitUndoGroup();
                 self.markDirty(branched);
                 self.ensureCursorVisible();
             }
@@ -439,7 +458,7 @@ pub const Editor = struct {
         }
         self.cursor.target_col = self.cursor.col;
 
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
         self.ensureCursorVisible();
     }
@@ -529,7 +548,10 @@ pub const Editor = struct {
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
         try self.undo_stack.record(.delete, prev_pos, del_bytes);
 
-        try self.buffer.delete(prev_pos, del_len);
+        self.buffer.delete(prev_pos, del_len) catch |err| {
+            self.undo_stack.discardLastCurrentOp();
+            return err;
+        };
         self.invalidateCaches();
 
         // Move cursor to deletion point
@@ -545,7 +567,7 @@ pub const Editor = struct {
             self.wrap_dirty_line = lc.line;
         }
 
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
         self.ensureCursorVisible();
     }
@@ -591,7 +613,7 @@ pub const Editor = struct {
             self.wrap_dirty_line = self.cursor.line;
         }
 
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
         self.ensureCursorVisible();
     }
@@ -613,7 +635,7 @@ pub const Editor = struct {
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
         try self.undo_stack.record(.delete, start_pos, deleted);
         try self.buffer.delete(start_pos, pos - start_pos);
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
 
         const lc = self.buffer.posToLineCol(start_pos);
@@ -639,7 +661,7 @@ pub const Editor = struct {
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
         try self.undo_stack.record(.delete, pos, deleted);
         try self.buffer.delete(pos, end_pos - pos);
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
 
         self.invalidateCaches();
@@ -739,7 +761,7 @@ pub const Editor = struct {
         self.cursor.moveTo(range.start_line, range.start_col);
         self.selection.clear();
 
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
         self.ensureCursorVisible();
     }
@@ -757,7 +779,7 @@ pub const Editor = struct {
             var applied_lines: u32 = 0;
 
             self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
-            errdefer {
+            errdefer if (!self.undo_stack.currentGroupEmpty()) {
                 while (applied_lines > 0) {
                     applied_lines -= 1;
                     const line_num = range.start_line + applied_lines;
@@ -765,7 +787,7 @@ pub const Editor = struct {
                     self.buffer.delete(ls, indent_width) catch {};
                 }
                 self.undo_stack.discardCurrentGroup();
-            }
+            };
 
             var line = range.start_line;
             while (line <= range.end_line) : (line += 1) {
@@ -775,7 +797,7 @@ pub const Editor = struct {
                 applied_lines += 1;
             }
 
-            const branched = try self.undo_stack.commit();
+            const branched = try self.commitUndoGroup();
             self.markDirty(branched);
             self.invalidateCaches();
             // Only adjust col if the cursor/anchor line was actually indented
@@ -844,7 +866,7 @@ pub const Editor = struct {
 
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
         var applied_changes: usize = 0;
-        errdefer {
+        errdefer if (!self.undo_stack.currentGroupEmpty()) {
             while (applied_changes > 0) {
                 applied_changes -= 1;
                 const change = changes[applied_changes];
@@ -852,7 +874,7 @@ pub const Editor = struct {
                 self.buffer.insert(ls, change.removed) catch {};
             }
             self.undo_stack.discardCurrentGroup();
-        }
+        };
 
         for (changes[0..change_count]) |change| {
             const remove: u32 = @intCast(change.removed.len);
@@ -871,7 +893,7 @@ pub const Editor = struct {
 
         if (change_count > 0) {
             self.undo_stack.setCursorAfter(self.cursor.line, self.cursor.col);
-            const branched = try self.undo_stack.commit();
+            const branched = try self.commitUndoGroup();
             self.markDirty(branched);
             self.invalidateCaches();
         }
@@ -906,6 +928,7 @@ pub const Editor = struct {
         if (!has_content_line) return;
 
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        errdefer self.undo_stack.rollbackCurrentGroup(&self.buffer);
 
         var cursor_col_delta: i32 = 0;
         var anchor_col_delta: i32 = 0;
@@ -929,7 +952,10 @@ pub const Editor = struct {
                     const removed = try self.buffer.getRange(self.allocator, prefix_start, prefix_start + remove_len);
                     defer self.allocator.free(removed);
                     try self.undo_stack.record(.delete, prefix_start, removed);
-                    try self.buffer.delete(prefix_start, remove_len);
+                    self.buffer.delete(prefix_start, remove_len) catch |err| {
+                        self.undo_stack.discardLastCurrentOp();
+                        return err;
+                    };
 
                     if (li == self.cursor.line and self.cursor.col > indent) {
                         const delta = @min(remove_len, self.cursor.col - indent);
@@ -951,7 +977,10 @@ pub const Editor = struct {
                     const insert_text = insert_buf[0 .. prefix.len + 1];
 
                     try self.undo_stack.record(.insert, prefix_start, insert_text);
-                    try self.buffer.insert(prefix_start, insert_text);
+                    self.buffer.insert(prefix_start, insert_text) catch |err| {
+                        self.undo_stack.discardLastCurrentOp();
+                        return err;
+                    };
 
                     const added: u32 = @intCast(insert_text.len);
                     if (li == self.cursor.line and self.cursor.col >= indent) {
@@ -967,7 +996,7 @@ pub const Editor = struct {
             li -= 1;
         }
 
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
         self.invalidateCaches();
 
@@ -1021,9 +1050,13 @@ pub const Editor = struct {
         }
 
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        errdefer self.undo_stack.rollbackCurrentGroup(&self.buffer);
         try self.undo_stack.record(.insert, insert_pos, insert_text);
-        try self.buffer.insert(insert_pos, insert_text);
-        const branched = try self.undo_stack.commit();
+        self.buffer.insert(insert_pos, insert_text) catch |err| {
+            self.undo_stack.discardLastCurrentOp();
+            return err;
+        };
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
 
         self.invalidateCaches();
@@ -1054,10 +1087,14 @@ pub const Editor = struct {
         defer self.allocator.free(deleted_text);
 
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        errdefer self.undo_stack.rollbackCurrentGroup(&self.buffer);
 
         // Step 1: Delete the above line (including its trailing \n)
         try self.undo_stack.record(.delete, above_start, deleted_text);
-        try self.buffer.delete(above_start, del_len);
+        self.buffer.delete(above_start, del_len) catch |err| {
+            self.undo_stack.discardLastCurrentOp();
+            return err;
+        };
 
         // After deletion, our range shifted up by 1. Insert "\nabove_content" at end of our range.
         const new_end_line = line_range.end_line - 1;
@@ -1069,12 +1106,15 @@ pub const Editor = struct {
         @memcpy(insert_text[1..], above_content);
 
         try self.undo_stack.record(.insert, insert_pos, insert_text);
-        try self.buffer.insert(insert_pos, insert_text);
+        self.buffer.insert(insert_pos, insert_text) catch |err| {
+            self.undo_stack.discardLastCurrentOp();
+            return err;
+        };
         // Record post-cursor BEFORE commit so redo can land in the right
         // place (the last-op-end fallback would put the cursor at the end
         // of the inserted block, not at the moved-up cursor).
         self.undo_stack.setCursorAfter(self.cursor.line - 1, self.cursor.col);
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
 
         self.invalidateCaches();
@@ -1105,10 +1145,14 @@ pub const Editor = struct {
         defer self.allocator.free(deleted_text);
 
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        errdefer self.undo_stack.rollbackCurrentGroup(&self.buffer);
 
         // Step 1: Delete "\nbelow_content"
         try self.undo_stack.record(.delete, del_start, deleted_text);
-        try self.buffer.delete(del_start, del_len);
+        self.buffer.delete(del_start, del_len) catch |err| {
+            self.undo_stack.discardLastCurrentOp();
+            return err;
+        };
 
         // Step 2: Insert "below_content\n" at the start of our range
         const insert_pos = self.buffer.lineStart(line_range.start_line);
@@ -1118,9 +1162,12 @@ pub const Editor = struct {
         insert_text[below_content.len] = '\n';
 
         try self.undo_stack.record(.insert, insert_pos, insert_text);
-        try self.buffer.insert(insert_pos, insert_text);
+        self.buffer.insert(insert_pos, insert_text) catch |err| {
+            self.undo_stack.discardLastCurrentOp();
+            return err;
+        };
         self.undo_stack.setCursorAfter(self.cursor.line + 1, self.cursor.col);
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
 
         self.invalidateCaches();
@@ -1337,6 +1384,9 @@ pub const Editor = struct {
         if (self.multi_cursor_word) |w| {
             self.allocator.free(w);
             self.multi_cursor_word = null;
+            // selectNextOccurrence shares the contiguous search snapshot;
+            // release it when the multi-cursor session ends.
+            self.clearSearchCache();
         }
     }
 
@@ -1356,8 +1406,7 @@ pub const Editor = struct {
         if (word.len == 0) return;
 
         // Find the next occurrence after the last cursor
-        const content = self.buffer.getContent(self.allocator) catch return;
-        defer self.allocator.free(content);
+        const content = self.searchContent() catch return;
 
         // Find the furthest cursor position
         var max_pos = self.buffer.lineColToPos(self.cursor.line, self.cursor.col);
@@ -1481,7 +1530,7 @@ pub const Editor = struct {
             }
         }
 
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
         self.invalidateCaches();
         self.ensureCursorVisible();
@@ -1557,7 +1606,7 @@ pub const Editor = struct {
             cur.moveTo(lc.line, lc.col);
         }
 
-        const branched = try self.undo_stack.commit();
+        const branched = try self.commitUndoGroup();
         self.markDirty(branched);
         self.invalidateCaches();
         self.ensureCursorVisible();
@@ -1586,8 +1635,30 @@ pub const Editor = struct {
         const prefix = self.buffer.getRange(self.allocator, prefix_start, pos) catch return null;
         defer self.allocator.free(prefix);
 
-        // Get full buffer content
-        const content = self.buffer.getContent(self.allocator) catch return null;
+        // Scan a bounded window around the cursor. Completion is an
+        // interactive hint, so walking/copying a 100 MB document on the main
+        // thread for every keystroke is disproportionate. Align the window to
+        // word boundaries so partial edge words are not suggested.
+        const total = self.buffer.totalLength();
+        const scan_limit: u32 = 512 * 1024;
+        var window_start = pos -| scan_limit / 2;
+        var window_end = @min(total, window_start +| scan_limit);
+        if (window_start > 0) {
+            while (window_start < pos) : (window_start += 1) {
+                const b = self.buffer.byteAt(window_start) orelse break;
+                if (!isWordByte(b)) {
+                    window_start += 1;
+                    break;
+                }
+            }
+        }
+        if (window_end < total) {
+            while (window_end > pos) : (window_end -= 1) {
+                const b = self.buffer.byteAt(window_end - 1) orelse break;
+                if (!isWordByte(b)) break;
+            }
+        }
+        const content = self.buffer.getRange(self.allocator, window_start, window_end) catch return null;
         defer self.allocator.free(content);
 
         // Scan for matching words (deduplicated)
@@ -1620,7 +1691,7 @@ pub const Editor = struct {
             if (!std.mem.startsWith(u8, word, prefix)) continue;
 
             // Skip if it's the same position as cursor
-            if (word_start == prefix_start) continue;
+            if (window_start + @as(u32, @intCast(word_start)) == prefix_start) continue;
 
             // Dedup
             if (seen.contains(word)) continue;
@@ -2132,7 +2203,7 @@ pub const Editor = struct {
 
         if (count > 0) {
             self.undo_stack.setCursorAfter(self.cursor.line, self.cursor.col);
-            const branched = try self.undo_stack.commit();
+            const branched = try self.commitUndoGroup();
             self.markDirty(branched);
             self.invalidateCaches();
         }
@@ -2237,15 +2308,15 @@ pub const Editor = struct {
         total_x: f32,
     };
 
-    pub fn byteColToPixelMetrics(self: *const Editor, line: u32, byte_col: u32) PixelMetrics {
+    pub fn byteColToPixelMetrics(self: *Editor, line: u32, byte_col: u32) PixelMetrics {
         const line_start = self.buffer.lineStart(line);
         const line_end = self.buffer.lineEnd(line);
-
-        const data = self.buffer.getRange(self.allocator, line_start, line_end) catch
+        const len = line_end - line_start;
+        self.metrics_line_scratch.resize(self.allocator, len) catch
             return .{ .segment = 0, .segment_x = 0, .total_x = 0 };
-        defer self.allocator.free(data);
+        if (len > 0) self.buffer.copyRange(line_start, line_end, self.metrics_line_scratch.items);
 
-        return self.byteColToPixelMetricsWithData(data, byte_col);
+        return self.byteColToPixelMetricsWithData(self.metrics_line_scratch.items, byte_col);
     }
 
     /// Same as byteColToPixelMetrics but takes pre-fetched line data, avoiding allocation.
@@ -2719,6 +2790,7 @@ pub const Editor = struct {
 
         const closing = autoPairClosing(ch) orelse return false;
         self.undo_stack.setCursorBefore(self.cursor.line, self.cursor.col);
+        errdefer self.undo_stack.rollbackCurrentGroup(&self.buffer);
 
         if (self.selection.active) {
             const range = self.selection.orderedRange(self.cursor.line, self.cursor.col);
@@ -2734,10 +2806,16 @@ pub const Editor = struct {
             wrapped[wrapped.len - 1] = closing;
 
             try self.undo_stack.record(.delete, start_pos, selected);
-            try self.buffer.delete(start_pos, end_pos - start_pos);
+            self.buffer.delete(start_pos, end_pos - start_pos) catch |err| {
+                self.undo_stack.discardLastCurrentOp();
+                return err;
+            };
             try self.undo_stack.record(.insert, start_pos, wrapped);
-            try self.buffer.insert(start_pos, wrapped);
-            const branched = try self.undo_stack.commit();
+            self.buffer.insert(start_pos, wrapped) catch |err| {
+                self.undo_stack.discardLastCurrentOp();
+                return err;
+            };
+            const branched = try self.commitUndoGroup();
             self.markDirty(branched);
 
             const end_lc = self.buffer.posToLineCol(start_pos + @as(u32, @intCast(wrapped.len)));
@@ -2746,8 +2824,11 @@ pub const Editor = struct {
         } else {
             var pair = [2]u8{ ch, closing };
             try self.undo_stack.record(.insert, cursor_pos, &pair);
-            try self.buffer.insert(cursor_pos, &pair);
-            const branched = try self.undo_stack.commit();
+            self.buffer.insert(cursor_pos, &pair) catch |err| {
+                self.undo_stack.discardLastCurrentOp();
+                return err;
+            };
+            const branched = try self.commitUndoGroup();
             self.markDirty(branched);
 
             const lc = self.buffer.posToLineCol(cursor_pos + 1);
@@ -2809,6 +2890,12 @@ pub const Editor = struct {
         }
         self.search_cache_edit_counter = self.edit_counter;
         return self.search_content_cache.items;
+    }
+
+    pub fn clearSearchCache(self: *Editor) void {
+        self.search_content_cache.deinit(self.allocator);
+        self.search_content_cache = .empty;
+        self.search_cache_edit_counter = 0xFFFFFFFF;
     }
 
     fn isWholeWordInContent(content: []const u8, start: u32, end: u32, total: u32) bool {
@@ -4211,6 +4298,26 @@ test "Editor: selectNextOccurrence guards against short content" {
 
     // Should return without panicking on the bounded slice.
     try ed.selectNextOccurrence();
+}
+
+test "Editor: multi-cursor undo restores the primary cursor" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("one\ntwo");
+    ed.cursor.moveTo(0, 1);
+    ed.selection.clear();
+    try ed.extra_cursors.append(testing.allocator, .{
+        .cursor = .{ .line = 1, .col = 1, .target_col = 1 },
+        .selection = .{},
+    });
+
+    try ed.multiCursorInsert("X");
+    try ed.undo();
+    try expectContent(&ed, "one\ntwo");
+    try testing.expectEqual(@as(u32, 0), ed.cursor.line);
+    try testing.expectEqual(@as(u32, 1), ed.cursor.col);
 }
 
 test "Editor: deleteBackward removes a ZWJ flag cluster" {

@@ -2,6 +2,12 @@ import SwiftUI
 import AppKit
 
 struct FileFinderView: View {
+    private struct IndexedFile: Sendable {
+        let path: String
+        let lowercasedPath: String
+        let lowercasedBasename: String
+    }
+
     @Binding var isVisible: Bool
     let rootPath: String
     let onOpen: (String) -> Void
@@ -11,24 +17,10 @@ struct FileFinderView: View {
     @State private var query = ""
     @State private var selectedIndex = 0
     @State private var eventMonitor: Any?
-    @State private var allFiles: [String] = []
+    @State private var indexedFiles: [IndexedFile] = []
+    @State private var filteredFiles: [String] = []
+    @State private var filterWorkItem: DispatchWorkItem?
     @FocusState private var queryFocused: Bool
-
-    private var filteredFiles: [String] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !trimmed.isEmpty else { return Array(allFiles.prefix(100)) }
-        let sorted = allFiles.filter { fuzzyMatch(query: trimmed, target: $0.lowercased()) }
-            .sorted { a, b in
-                // Prefer shorter paths and basename matches
-                let aName = (a as NSString).lastPathComponent.lowercased()
-                let bName = (b as NSString).lastPathComponent.lowercased()
-                let aExact = aName.contains(trimmed)
-                let bExact = bName.contains(trimmed)
-                if aExact != bExact { return aExact }
-                return a.count < b.count
-            }
-        return Array(sorted.prefix(50))
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -102,7 +94,15 @@ struct FileFinderView: View {
             // Scan files off the main thread to avoid UI freeze on large directories
             DispatchQueue.global(qos: .userInitiated).async {
                 let files = scanFiles(root: rootPath)
-                DispatchQueue.main.async { allFiles = files }
+                let indexed = files.map {
+                    IndexedFile(path: $0,
+                                lowercasedPath: $0.lowercased(),
+                                lowercasedBasename: ($0 as NSString).lastPathComponent.lowercased())
+                }
+                DispatchQueue.main.async {
+                    indexedFiles = indexed
+                    scheduleFilter()
+                }
             }
             eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 let count = filteredFiles.count
@@ -119,15 +119,19 @@ struct FileFinderView: View {
             }
         }
         .onDisappear {
+            filterWorkItem?.cancel()
             if let monitor = eventMonitor {
                 NSEvent.removeMonitor(monitor)
                 eventMonitor = nil
             }
         }
-        .onChange(of: query) { selectedIndex = 0 }
+        .onChange(of: query) {
+            selectedIndex = 0
+            scheduleFilter()
+        }
     }
 
-    private func fuzzyMatch(query: String, target: String) -> Bool {
+    private static func fuzzyMatch(query: String, target: String) -> Bool {
         var qi = query.startIndex
         var ti = target.startIndex
         while qi < query.endIndex && ti < target.endIndex {
@@ -137,6 +141,37 @@ struct FileFinderView: View {
             ti = target.index(after: ti)
         }
         return qi == query.endIndex
+    }
+
+    private static func filter(_ files: [IndexedFile], query: String) -> [String] {
+        guard !query.isEmpty else { return Array(files.prefix(100).map(\.path)) }
+        return Array(files.lazy
+            .filter { fuzzyMatch(query: query, target: $0.lowercasedPath) }
+            .sorted { a, b in
+                let aExact = a.lowercasedBasename.contains(query)
+                let bExact = b.lowercasedBasename.contains(query)
+                if aExact != bExact { return aExact }
+                return a.path.count < b.path.count
+            }
+            .prefix(50)
+            .map(\.path))
+    }
+
+    private func scheduleFilter() {
+        filterWorkItem?.cancel()
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let files = indexedFiles
+        let item = DispatchWorkItem {
+            let result = Self.filter(files, query: normalizedQuery)
+            DispatchQueue.main.async {
+                guard query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedQuery else { return }
+                filteredFiles = result
+                selectedIndex = min(selectedIndex, max(result.count - 1, 0))
+            }
+        }
+        filterWorkItem = item
+        DispatchQueue.global(qos: .userInitiated)
+            .asyncAfter(deadline: .now() + .milliseconds(80), execute: item)
     }
 
     private func removeMonitor() {
@@ -202,7 +237,14 @@ struct FileFinderView: View {
 
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             if !isDir {
-                let relative = url.path.replacingOccurrences(of: root + "/", with: "")
+                // Strip only the leading root prefix, not every occurrence
+                // of it -- replacingOccurrences would also remove any later
+                // substring matching the root path (e.g. a file at
+                // "<root>/mirror/<root>/x.txt" would wrongly collapse to
+                // "mirror/x.txt", so selecting it would open/create the
+                // wrong file).
+                let prefix = root + "/"
+                let relative = url.path.hasPrefix(prefix) ? String(url.path.dropFirst(prefix.count)) : url.path
                 results.append(relative)
                 if results.count >= maxFiles { break }
             }

@@ -192,9 +192,15 @@ class MatchaEditor: ObservableObject {
 
     func getSelectionText() -> String? {
         guard let h = handle else { return nil }
-        guard let cStr = matcha_editor_get_selection_text(h) else { return nil }
-        let str = String(cString: cStr)
-        matcha_editor_free_string(cStr)
+        var len: UInt32 = 0
+        guard let cStr = matcha_editor_get_selection_text(h, &len) else { return nil }
+        // Decode using the explicit length, not String(cString:), which
+        // stops at the first NUL byte and would silently truncate a
+        // selection containing embedded NUL bytes.
+        let utf8Ptr = UnsafeRawPointer(cStr).assumingMemoryBound(to: UInt8.self)
+        let buffer = UnsafeBufferPointer(start: utf8Ptr, count: Int(len))
+        let str = String(decoding: buffer, as: UTF8.self)
+        matcha_editor_free_string(cStr, len)
         return str
     }
 
@@ -212,7 +218,7 @@ class MatchaEditor: ObservableObject {
         let utf8Ptr = UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self)
         let buffer = UnsafeBufferPointer(start: utf8Ptr, count: Int(len))
         let content = String(decoding: buffer, as: UTF8.self)
-        matcha_editor_free_string(ptr)
+        matcha_editor_free_string(ptr, len)
         return content
     }
 
@@ -399,6 +405,11 @@ class MatchaEditor: ObservableObject {
             updateInfo()
             return result
         }
+    }
+
+    func clearSearchCache() {
+        guard let h = handle else { return }
+        matcha_editor_clear_search_cache(h)
     }
 
     func replaceNext(query: String, replacement: String,

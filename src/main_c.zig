@@ -363,24 +363,29 @@ export fn matcha_editor_select_word_right(ed: ?*Editor) void {
 
 // ── Clipboard ──────────────────────────────────────────────────
 
-export fn matcha_editor_get_selection_text(ed: ?*Editor) ?[*:0]u8 {
+export fn matcha_editor_get_selection_text(ed: ?*Editor, len: ?*u32) ?[*:0]u8 {
     const e = ed orelse return null;
+    const out_len = len orelse return null;
     const text = e.getSelectionText() orelse return null;
     defer e.allocator.free(text);
-    // Copy to C-owned null-terminated string
+    // Copy to C-owned null-terminated string. Always allocate with
+    // c_allocator (see matcha_editor_get_content) since the free functions
+    // always free with c_allocator regardless of the Editor's own allocator.
     const result = c_allocator.allocSentinel(u8, text.len, 0) catch return null;
     @memcpy(result[0..text.len], text);
+    out_len.* = @intCast(text.len);
     return result.ptr;
 }
 
 export fn matcha_editor_get_content(ed: ?*Editor, len: ?*u32) ?[*:0]u8 {
     const e = ed orelse return null;
+    const out_len = len orelse return null;
     // Always allocate the returned buffer with c_allocator (regardless of
     // which allocator the Editor itself was constructed with, e.g. tests
     // use testing.allocator) since matcha_editor_free_string always frees
     // with c_allocator.
     const result = e.buffer.getContentZ(c_allocator) catch return null;
-    if (len) |out_len| out_len.* = @intCast(result.len);
+    out_len.* = @intCast(result.len);
     return result.ptr;
 }
 
@@ -447,10 +452,9 @@ export fn matcha_editor_set_selection_offsets(ed: ?*Editor, start: u32, end: u32
     if (ed) |e| e.setSelectionPosRange(start, end);
 }
 
-export fn matcha_editor_free_string(str: ?[*:0]u8) void {
+export fn matcha_editor_free_string(str: ?[*:0]u8, len: u32) void {
     if (str) |s| {
-        const slice = std.mem.span(s);
-        c_allocator.free(slice[0 .. slice.len + 1]); // +1 for sentinel
+        c_allocator.free(s[0 .. @as(usize, len) + 1]); // +1 for sentinel
     }
 }
 
@@ -694,6 +698,10 @@ export fn matcha_editor_find_prev_with_options(ed: ?*Editor, query: ?[*]const u8
     return e.findPrevWithOptions(q[0..len], .{ .case_sensitive = case_sensitive, .whole_word = whole_word });
 }
 
+export fn matcha_editor_clear_search_cache(ed: ?*Editor) void {
+    if (ed) |e| e.clearSearchCache();
+}
+
 export fn matcha_editor_replace_next(ed: ?*Editor, query: ?[*]const u8, q_len: u32, replacement: ?[*]const u8, r_len: u32) bool {
     const e = ed orelse return false;
     const q = query orelse return false;
@@ -854,22 +862,6 @@ export fn matcha_editor_get_line_number_labels(ed: ?*Editor, count: ?*u32) ?[*]c
     return items.ptr;
 }
 
-export fn matcha_editor_get_atlas_data(ed: ?*Editor, width: ?*u32, height: ?*u32) ?[*]const u8 {
-    _ = ed;
-    if (width) |w| w.* = 0;
-    if (height) |h| h.* = 0;
-    return null; // Atlas data not yet wired — Metal side uses CoreText directly for now
-}
-
-export fn matcha_editor_atlas_needs_update(ed: ?*Editor) bool {
-    _ = ed;
-    return false;
-}
-
-export fn matcha_editor_atlas_clear_dirty(ed: ?*Editor) void {
-    _ = ed;
-}
-
 // ── Info ───────────────────────────────────────────────────────
 
 const EditorInfo = extern struct {
@@ -947,7 +939,7 @@ test "main_c: content and selection offsets expose editor state" {
 
     var len: u32 = 0;
     const content_ptr = matcha_editor_get_content(&ed, &len).?;
-    defer matcha_editor_free_string(content_ptr);
+    defer matcha_editor_free_string(content_ptr, len);
     try testing.expectEqual(@as(u32, 5), len);
     try testing.expectEqualStrings("hello", std.mem.span(content_ptr));
 

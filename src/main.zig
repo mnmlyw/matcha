@@ -11,7 +11,6 @@ pub const Config = @import("config/Config.zig").Config;
 pub const Parser = @import("config/Parser.zig");
 pub const RenderState = @import("render/RenderState.zig").RenderState;
 pub const Cell = @import("render/Cell.zig");
-pub const Atlas = @import("font/Atlas.zig").Atlas;
 pub const FontMetrics = @import("font/Metrics.zig").FontMetrics;
 pub const Key = @import("input/Key.zig");
 pub const Keybind = @import("input/Keybind.zig");
@@ -36,7 +35,6 @@ test {
     _ = @import("config/Parser.zig");
     _ = @import("render/RenderState.zig");
     _ = @import("render/Cell.zig");
-    _ = @import("font/Atlas.zig");
     _ = @import("font/Metrics.zig");
     _ = @import("input/Key.zig");
     _ = @import("input/Keybind.zig");

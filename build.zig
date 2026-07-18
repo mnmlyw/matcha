@@ -19,7 +19,6 @@ const zig_fmt_paths = [_][]const u8{
     "src/editor/UndoStack.zig",
     "src/editor/Editor.zig",
     "src/font/Metrics.zig",
-    "src/font/Atlas.zig",
     "src/main_c.zig",
     "src/render/Cell.zig",
     "src/render/RenderState.zig",

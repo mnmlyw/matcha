@@ -12,11 +12,13 @@ class MetalRenderer {
     let colorPipeline: MTLRenderPipelineState
     let textPipeline: MTLRenderPipelineState
     let emojiPipeline: MTLRenderPipelineState
+    private let inFlightSemaphore = DispatchSemaphore(value: 1)
 
     var glyphAtlasTexture: MTLTexture?
     var emojiAtlasTexture: MTLTexture?
     var glyphCache: [UInt32: GlyphUV] = [:]
     var clusterGlyphCache: [String: GlyphUV] = [:]
+    private var frameClusterCache: [Int: GlyphUV] = [:]
     /// Fallback CTFont per codepoint — CTFontCreateForString is expensive and
     /// was being called inside the rasterize hot path for every unknown
     /// codepoint of every frame.
@@ -78,6 +80,7 @@ class MetalRenderer {
     var emojiDirtyMinY: Int = Int.max
     var emojiDirtyMaxX: Int = 0
     var emojiDirtyMaxY: Int = 0
+    private var atlasResetPending = false
 
     var scaleFactor: Float = 2.0
     let ascender: Float
@@ -98,6 +101,13 @@ class MetalRenderer {
     private var ghostQuads: [QuadVertex] = []
     private var ghostVertexBuffer: MTLBuffer?
     private var viewportBuffer: MTLBuffer?
+    private var bgVertexCount = 0
+    private var textVertexCount = 0
+    private var emojiVertexCount = 0
+    private var gutterVertexCount = 0
+    private var cursorVertexCount = 0
+    private var lineNumberVertexCount = 0
+    private var ghostVertexCount = 0
 
     init?(device: MTLDevice, view: MTKView, font: NSFont, cellWidth: Float, cellHeight: Float, scaleFactor: Float = 2.0) {
         self.device = device
@@ -149,16 +159,24 @@ class MetalRenderer {
         self.viewportBuffer = device.makeBuffer(length: MemoryLayout<ViewportUniforms>.size, options: .storageModeShared)
     }
 
-    func draw(in view: MTKView, editor: MatchaEditor, cursorVisible: Bool, inlineHint: String? = nil) {
+    func draw(in view: MTKView, editor: MatchaEditor, cursorVisible: Bool,
+              inlineHint: String? = nil, rebuildGeometry: Bool = true) {
         // Skip rendering when the window is minimized or has zero backing size;
         // otherwise we'd encode and present an empty frame on every timer tick.
         guard view.drawableSize.width > 0, view.drawableSize.height > 0 else { return }
+        inFlightSemaphore.wait()
         guard let drawable = view.currentDrawable,
               let renderPassDescriptor = view.currentRenderPassDescriptor,
-              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
-
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            inFlightSemaphore.signal()
+            return
+        }
         let viewWidth = Float(view.drawableSize.width) / scaleFactor
         let viewHeight = Float(view.drawableSize.height) / scaleFactor
+
+        if rebuildGeometry && atlasResetPending {
+            resetAtlases()
+        }
 
         var viewport = ViewportUniforms(width: viewWidth, height: viewHeight)
         viewportBuffer?.contents().copyMemory(from: &viewport, byteCount: MemoryLayout<ViewportUniforms>.size)
@@ -171,117 +189,137 @@ class MetalRenderer {
         let bracketHighlights = editor.getBracketHighlights()
         let clusterData = editor.getClusterData()
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            inFlightSemaphore.signal()
+            return
+        }
+        commandBuffer.addCompletedHandler { [inFlightSemaphore] _ in
+            inFlightSemaphore.signal()
+        }
 
         // Pass 1: Cell backgrounds + selection rects + bracket highlights
         encoder.setRenderPipelineState(colorPipeline)
         encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
-        bgQuads.removeAll(keepingCapacity: true)
-        bgQuads.reserveCapacity((cells.count + selections.count + bracketHighlights.count) * 6)
-        for i in 0..<cells.count {
-            let cell = cells[i]
-            let bgColor = colorToRGBA(cell.bg)
-            if bgColor.a > 0.01 {
-                appendQuad(&bgQuads, x: cell.x, y: cell.y, w: cell.w, h: cell.h,
-                           r: bgColor.r, g: bgColor.g, b: bgColor.b, a: bgColor.a)
+        if rebuildGeometry {
+            bgQuads.removeAll(keepingCapacity: true)
+            bgQuads.reserveCapacity((cells.count + selections.count + bracketHighlights.count) * 6)
+            for i in 0..<cells.count {
+                let cell = cells[i]
+                let bgColor = colorToRGBA(cell.bg)
+                if bgColor.a > 0.01 {
+                    appendQuad(&bgQuads, x: cell.x, y: cell.y, w: cell.w, h: cell.h,
+                               r: bgColor.r, g: bgColor.g, b: bgColor.b, a: bgColor.a)
+                }
             }
+            for i in 0..<selections.count {
+                let sel = selections[i]
+                let rgba = colorToRGBA(sel.color)
+                appendQuad(&bgQuads, x: sel.x, y: sel.y, w: sel.w, h: sel.h,
+                           r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a)
+            }
+            for i in 0..<bracketHighlights.count {
+                let bh = bracketHighlights[i]
+                let rgba = colorToRGBA(bh.color)
+                appendQuad(&bgQuads, x: bh.x, y: bh.y, w: bh.w, h: bh.h,
+                           r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a)
+            }
+            _ = Self.uploadVertices(bgQuads, device: device, into: &bgVertexBuffer)
+            bgVertexCount = bgQuads.count
         }
-        for i in 0..<selections.count {
-            let sel = selections[i]
-            let rgba = colorToRGBA(sel.color)
-            appendQuad(&bgQuads, x: sel.x, y: sel.y, w: sel.w, h: sel.h,
-                       r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a)
-        }
-        for i in 0..<bracketHighlights.count {
-            let bh = bracketHighlights[i]
-            let rgba = colorToRGBA(bh.color)
-            appendQuad(&bgQuads, x: bh.x, y: bh.y, w: bh.w, h: bh.h,
-                       r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a)
-        }
-        if let buffer = Self.uploadVertices(bgQuads, device: device, into: &bgVertexBuffer) {
+        if let buffer = bgVertexBuffer, bgVertexCount > 0 {
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: bgQuads.count)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: bgVertexCount)
         }
 
         // Pass 2: Content text (monochrome glyphs)
         encoder.setRenderPipelineState(textPipeline)
         encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
         ensureAtlasTexture()
-        textQuads.removeAll(keepingCapacity: true)
-        emojiQuads.removeAll(keepingCapacity: true)
-        textQuads.reserveCapacity(cells.count * 6)
-        for i in 0..<cells.count {
-            let cell = cells[i]
-            let codepoint = cell.glyph_index
-            if codepoint <= 32 { continue }
+        if rebuildGeometry {
+            frameClusterCache.removeAll(keepingCapacity: true)
+            textQuads.removeAll(keepingCapacity: true)
+            emojiQuads.removeAll(keepingCapacity: true)
+            textQuads.reserveCapacity(cells.count * 6)
+            for i in 0..<cells.count {
+                let cell = cells[i]
+                let codepoint = cell.glyph_index
+                if codepoint <= 32 { continue }
 
-            let uv = ensureGlyph(codepoint: codepoint, clusterData: clusterData)
-            if uv.glyphWidth <= 0 { continue }
+                let uv = ensureGlyph(codepoint: codepoint, clusterData: clusterData)
+                if uv.glyphWidth <= 0 { continue }
 
-            let glyphX = cell.x + uv.bearingX
-            let glyphY = cell.y + ascender - uv.bearingY
+                let glyphX = cell.x + uv.bearingX
+                let glyphY = cell.y + ascender - uv.bearingY
 
-            if uv.isColor {
-                appendTextQuad(&emojiQuads,
-                               x: glyphX, y: glyphY,
-                               w: uv.glyphWidth, h: uv.glyphHeight,
-                               uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
-                               r: 1, g: 1, b: 1, a: 1)
-            } else {
-                let fgColor = colorToRGBA(cell.fg)
-                appendTextQuad(&textQuads,
-                               x: glyphX, y: glyphY,
-                               w: uv.glyphWidth, h: uv.glyphHeight,
-                               uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
-                               r: fgColor.r, g: fgColor.g, b: fgColor.b, a: fgColor.a)
+                if uv.isColor {
+                    appendTextQuad(&emojiQuads,
+                                   x: glyphX, y: glyphY,
+                                   w: uv.glyphWidth, h: uv.glyphHeight,
+                                   uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
+                                   r: 1, g: 1, b: 1, a: 1)
+                } else {
+                    let fgColor = colorToRGBA(cell.fg)
+                    appendTextQuad(&textQuads,
+                                   x: glyphX, y: glyphY,
+                                   w: uv.glyphWidth, h: uv.glyphHeight,
+                                   uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
+                                   r: fgColor.r, g: fgColor.g, b: fgColor.b, a: fgColor.a)
+                }
             }
+            _ = Self.uploadVertices(textQuads, device: device, into: &textVertexBuffer)
+            _ = Self.uploadVertices(emojiQuads, device: device, into: &emojiVertexBuffer)
+            textVertexCount = textQuads.count
+            emojiVertexCount = emojiQuads.count
         }
         ensureAtlasTexture()
-        if let buffer = Self.uploadVertices(textQuads, device: device, into: &textVertexBuffer),
+        if let buffer = textVertexBuffer,
+           textVertexCount > 0,
            let atlasTexture = glyphAtlasTexture
         {
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
             encoder.setFragmentTexture(atlasTexture, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: textQuads.count)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: textVertexCount)
         }
 
         // Pass 2b: Color emoji
-        if !emojiQuads.isEmpty {
+        if emojiVertexCount > 0 {
             encoder.setRenderPipelineState(emojiPipeline)
             encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
             ensureEmojiAtlasTexture()
-            if let buffer = Self.uploadVertices(emojiQuads, device: device, into: &emojiVertexBuffer),
+            if let buffer = emojiVertexBuffer,
                let emojiTex = emojiAtlasTexture
             {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 encoder.setFragmentTexture(emojiTex, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: emojiQuads.count)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: emojiVertexCount)
             }
         }
 
         // Pass 3: Gutter backgrounds
         encoder.setRenderPipelineState(colorPipeline)
         encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
-        gutterQuads.removeAll(keepingCapacity: true)
-        gutterQuads.reserveCapacity(gutterRows.count * 6)
-        for i in 0..<gutterRows.count {
-            let ln = gutterRows[i]
-            let rgba = colorToRGBA(ln.color)
-            appendQuad(&gutterQuads, x: ln.x, y: ln.y, w: ln.w, h: ln.h,
-                       r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a)
+        if rebuildGeometry {
+            gutterQuads.removeAll(keepingCapacity: true)
+            gutterQuads.reserveCapacity(gutterRows.count * 6)
+            for i in 0..<gutterRows.count {
+                let ln = gutterRows[i]
+                let rgba = colorToRGBA(ln.color)
+                appendQuad(&gutterQuads, x: ln.x, y: ln.y, w: ln.w, h: ln.h,
+                           r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a)
+            }
+            _ = Self.uploadVertices(gutterQuads, device: device, into: &gutterVertexBuffer)
+            gutterVertexCount = gutterQuads.count
         }
-        if let buffer = Self.uploadVertices(gutterQuads, device: device, into: &gutterVertexBuffer) {
+        if let buffer = gutterVertexBuffer, gutterVertexCount > 0 {
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: gutterQuads.count)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: gutterVertexCount)
         }
 
         // Pass 4: Line number text
-        drawLineNumbers(encoder: encoder, lineNumbers: lineNumberLabels)
+        drawLineNumbers(encoder: encoder, lineNumbers: lineNumberLabels, rebuildGeometry: rebuildGeometry)
 
         // Pass 5: Cursors
-        if cursorVisible {
-            encoder.setRenderPipelineState(colorPipeline)
-            encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
+        if rebuildGeometry {
             cursorQuads.removeAll(keepingCapacity: true)
             cursorQuads.reserveCapacity(cursors.count * 6)
             for i in 0..<cursors.count {
@@ -290,9 +328,15 @@ class MetalRenderer {
                 appendQuad(&cursorQuads, x: cursor.x, y: cursor.y, w: cursor.w, h: cursor.h,
                            r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a)
             }
-            if let buffer = Self.uploadVertices(cursorQuads, device: device, into: &cursorVertexBuffer) {
+            _ = Self.uploadVertices(cursorQuads, device: device, into: &cursorVertexBuffer)
+            cursorVertexCount = cursorQuads.count
+        }
+        if cursorVisible {
+            encoder.setRenderPipelineState(colorPipeline)
+            encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
+            if let buffer = cursorVertexBuffer, cursorVertexCount > 0 {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cursorQuads.count)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cursorVertexCount)
             }
         }
 
@@ -301,36 +345,43 @@ class MetalRenderer {
             encoder.setRenderPipelineState(textPipeline)
             encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
             ensureAtlasTexture()
-            ghostQuads.removeAll(keepingCapacity: true)
+            if rebuildGeometry {
+                ghostQuads.removeAll(keepingCapacity: true)
 
-            let cursor = cursors[0]
-            var ghostX = cursor.x + cursor.w + 1 // start after cursor beam
-            let ghostY = cursor.y
+                let cursor = cursors[0]
+                var ghostX = cursor.x + cursor.w + 1
+                let ghostY = cursor.y
 
-            for scalar in hint.unicodeScalars {
-                let cp = UInt32(scalar.value)
-                let uv = ensureGlyph(codepoint: cp)
-                if uv.glyphWidth <= 0 { continue }
+                for scalar in hint.unicodeScalars {
+                    let cp = UInt32(scalar.value)
+                    let uv = ensureGlyph(codepoint: cp)
+                    if uv.glyphWidth <= 0 { continue }
 
-                let glyphX = ghostX + uv.bearingX
-                let glyphY = ghostY + ascender - uv.bearingY
+                    let glyphX = ghostX + uv.bearingX
+                    let glyphY = ghostY + ascender - uv.bearingY
 
-                appendTextQuad(&ghostQuads,
-                               x: glyphX, y: glyphY,
-                               w: uv.glyphWidth, h: uv.glyphHeight,
-                               uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
-                               r: 0.5, g: 0.5, b: 0.5, a: 0.4)
-                ghostX += cellWidth
+                    appendTextQuad(&ghostQuads,
+                                   x: glyphX, y: glyphY,
+                                   w: uv.glyphWidth, h: uv.glyphHeight,
+                                   uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
+                                   r: 0.5, g: 0.5, b: 0.5, a: 0.4)
+                    ghostX += cellWidth
+                }
+                _ = Self.uploadVertices(ghostQuads, device: device, into: &ghostVertexBuffer)
+                ghostVertexCount = ghostQuads.count
             }
 
             ensureAtlasTexture()
-            if let buffer = Self.uploadVertices(ghostQuads, device: device, into: &ghostVertexBuffer),
+            if let buffer = ghostVertexBuffer,
+               ghostVertexCount > 0,
                let atlasTexture = glyphAtlasTexture
             {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 encoder.setFragmentTexture(atlasTexture, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: ghostQuads.count)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: ghostVertexCount)
             }
+        } else if rebuildGeometry {
+            ghostVertexCount = 0
         }
 
         encoder.endEncoding()
@@ -340,58 +391,65 @@ class MetalRenderer {
 
     // MARK: - Line Numbers
 
-    private func drawLineNumbers(encoder: MTLRenderCommandEncoder, lineNumbers: UnsafeBufferPointer<matcha_render_line_number_s>) {
+    private func drawLineNumbers(encoder: MTLRenderCommandEncoder,
+                                 lineNumbers: UnsafeBufferPointer<matcha_render_line_number_s>,
+                                 rebuildGeometry: Bool) {
         encoder.setRenderPipelineState(textPipeline)
         encoder.setVertexBuffer(viewportBuffer, offset: 0, index: 1)
         ensureAtlasTexture()
 
-        lineNumberQuads.removeAll(keepingCapacity: true)
-        lineNumberQuads.reserveCapacity(lineNumbers.count * 24)
+        if rebuildGeometry {
+            lineNumberQuads.removeAll(keepingCapacity: true)
+            lineNumberQuads.reserveCapacity(lineNumbers.count * 24)
 
-        for i in 0..<lineNumbers.count {
-            let ln = lineNumbers[i]
-            let gutterW = ln.w
-            let rightPad = cellWidth * 0.5
-            let lineNumColor = colorToRGBA(ln.color)
+            for i in 0..<lineNumbers.count {
+                let ln = lineNumbers[i]
+                let gutterW = ln.w
+                let rightPad = cellWidth * 0.5
+                let lineNumColor = colorToRGBA(ln.color)
 
-            var num = Int(ln.line)
-            var digitCount = 0
-            var digitBuf: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) = (0,0,0,0,0,0,0,0,0,0)
-            withUnsafeMutablePointer(to: &digitBuf) { ptr in
-                ptr.withMemoryRebound(to: UInt32.self, capacity: 10) { buf in
-                    repeat {
-                        buf[digitCount] = UInt32(num % 10) + 48
-                        digitCount += 1
-                        num /= 10
-                    } while num > 0
+                var num = Int(ln.line)
+                var digitCount = 0
+                var digitBuf: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) = (0,0,0,0,0,0,0,0,0,0)
+                withUnsafeMutablePointer(to: &digitBuf) { ptr in
+                    ptr.withMemoryRebound(to: UInt32.self, capacity: 10) { buf in
+                        repeat {
+                            buf[digitCount] = UInt32(num % 10) + 48
+                            digitCount += 1
+                            num /= 10
+                        } while num > 0
+                    }
                 }
-            }
 
-            withUnsafePointer(to: &digitBuf) { ptr in
-                ptr.withMemoryRebound(to: UInt32.self, capacity: 10) { buf in
-                    for di in 0..<digitCount {
-                        let codepoint = buf[di]
-                        let uv = ensureGlyph(codepoint: codepoint)
-                        let digitX = ln.x + gutterW - Float(di + 1) * cellWidth - rightPad
-                        let digitY = ln.y + ascender - uv.bearingY
+                withUnsafePointer(to: &digitBuf) { ptr in
+                    ptr.withMemoryRebound(to: UInt32.self, capacity: 10) { buf in
+                        for di in 0..<digitCount {
+                            let codepoint = buf[di]
+                            let uv = ensureGlyph(codepoint: codepoint)
+                            let digitX = ln.x + gutterW - Float(di + 1) * cellWidth - rightPad
+                            let digitY = ln.y + ascender - uv.bearingY
 
-                        appendTextQuad(&lineNumberQuads,
-                                       x: digitX + uv.bearingX, y: digitY,
-                                       w: uv.glyphWidth, h: uv.glyphHeight,
-                                       uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
-                                       r: lineNumColor.r, g: lineNumColor.g, b: lineNumColor.b, a: lineNumColor.a)
+                            appendTextQuad(&lineNumberQuads,
+                                           x: digitX + uv.bearingX, y: digitY,
+                                           w: uv.glyphWidth, h: uv.glyphHeight,
+                                           uvX: uv.uvX, uvY: uv.uvY, uvW: uv.uvW, uvH: uv.uvH,
+                                           r: lineNumColor.r, g: lineNumColor.g, b: lineNumColor.b, a: lineNumColor.a)
+                        }
                     }
                 }
             }
+            _ = Self.uploadVertices(lineNumberQuads, device: device, into: &lineNumberVertexBuffer)
+            lineNumberVertexCount = lineNumberQuads.count
         }
 
         ensureAtlasTexture()
-        if let buffer = Self.uploadVertices(lineNumberQuads, device: device, into: &lineNumberVertexBuffer),
+        if let buffer = lineNumberVertexBuffer,
+           lineNumberVertexCount > 0,
            let atlasTexture = glyphAtlasTexture
         {
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
             encoder.setFragmentTexture(atlasTexture, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: lineNumberQuads.count)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: lineNumberVertexCount)
         }
     }
 
@@ -439,6 +497,30 @@ class MetalRenderer {
     }
 
     // MARK: - Glyph Atlas (grayscale)
+
+    /// Reset-and-repack fallback once either append-only atlas reaches its
+    /// dimension limit. The next geometry rebuild repacks the visible working
+    /// set, reclaiming space from glyphs that are no longer on screen.
+    private func resetAtlases() {
+        glyphCache.removeAll(keepingCapacity: true)
+        clusterGlyphCache.removeAll(keepingCapacity: true)
+        frameClusterCache.removeAll(keepingCapacity: true)
+
+        atlasData = [UInt8](repeating: 0, count: atlasWidth * atlasHeight)
+        atlasCursorX = 0; atlasCursorY = 0; atlasRowHeight = 0
+        atlasDirty = true
+        atlasDirtyMinX = 0; atlasDirtyMinY = 0
+        atlasDirtyMaxX = atlasWidth; atlasDirtyMaxY = atlasHeight
+        glyphAtlasTexture = nil
+
+        emojiAtlasData = [UInt8](repeating: 0, count: emojiAtlasWidth * emojiAtlasHeight * 4)
+        emojiCursorX = 0; emojiCursorY = 0; emojiRowHeight = 0
+        emojiAtlasDirty = true
+        emojiDirtyMinX = 0; emojiDirtyMinY = 0
+        emojiDirtyMaxX = emojiAtlasWidth; emojiDirtyMaxY = emojiAtlasHeight
+        emojiAtlasTexture = nil
+        atlasResetPending = false
+    }
 
     private func ensureAtlasTexture() {
         if glyphAtlasTexture == nil {
@@ -621,9 +703,11 @@ class MetalRenderer {
         // Multi-codepoint cluster: extract string from cluster data buffer
         if codepoint >= Self.clusterSentinel {
             let offset = Int(codepoint - Self.clusterSentinel)
+            if let cached = frameClusterCache[offset] { return cached }
             guard offset < clusterData.count else {
                 let uv = GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                                   bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
+                frameClusterCache[offset] = uv
                 return uv
             }
             // Read null-terminated UTF-8 string
@@ -633,15 +717,14 @@ class MetalRenderer {
             let str = String(bytes: bytes, encoding: .utf8) ?? "\u{FFFD}"
             // Cache by string content, not offset (offsets are unstable across frames)
             if let cached = clusterGlyphCache[str] {
+                frameClusterCache[offset] = cached
                 return cached
             }
             let uv = rasterizeClusterGlyph(key: codepoint, string: str)
-            // Only cache successful rasterizations. An empty UV here means the
-            // atlas overflowed; caching it would prevent retry on a later
-            // frame (after eviction or a larger atlas).
-            if uv.glyphWidth > 0 {
-                clusterGlyphCache[str] = uv
-            }
+            // Cache missing/overflow results too. Otherwise an atlas at its
+            // limit re-enters CoreText for the same blank glyph every frame.
+            clusterGlyphCache[str] = uv
+            frameClusterCache[offset] = uv
             return uv
         }
 
@@ -692,13 +775,16 @@ class MetalRenderer {
             return uv
         }
 
+        let uv: GlyphUV
         if useColorAtlas {
-            return rasterizeColorGlyph(codepoint: codepoint, renderFont: renderFont, glyphs: glyphs,
-                                       boundingRect: boundingRect, glyphW: glyphW, glyphH: glyphH, padding: padding)
+            uv = rasterizeColorGlyph(codepoint: codepoint, renderFont: renderFont, glyphs: glyphs,
+                                     boundingRect: boundingRect, glyphW: glyphW, glyphH: glyphH, padding: padding)
         } else {
-            return rasterizeMonoGlyph(codepoint: codepoint, renderFont: renderFont, glyphs: glyphs,
-                                      boundingRect: boundingRect, glyphW: glyphW, glyphH: glyphH, padding: padding)
+            uv = rasterizeMonoGlyph(codepoint: codepoint, renderFont: renderFont, glyphs: glyphs,
+                                    boundingRect: boundingRect, glyphW: glyphW, glyphH: glyphH, padding: padding)
         }
+        glyphCache[codepoint] = uv
+        return uv
     }
 
     /// Rasterize a multi-codepoint cluster (flags, ZWJ sequences, keycaps) using CTLine.
@@ -736,6 +822,7 @@ class MetalRenderer {
             _ = growEmojiAtlas(minWidth: glyphW, minHeight: emojiAtlasHeight)
         }
         if glyphW > emojiAtlasWidth {
+            atlasResetPending = true
             return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                            bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
         }
@@ -746,6 +833,7 @@ class MetalRenderer {
         }
         if emojiCursorY + glyphH > emojiAtlasHeight {
             if !growEmojiAtlas(minWidth: emojiAtlasWidth, minHeight: emojiCursorY + glyphH) {
+                atlasResetPending = true
                 return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                                bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
             }
@@ -807,6 +895,7 @@ class MetalRenderer {
             _ = growMonoAtlas(minWidth: glyphW, minHeight: atlasHeight)
         }
         if glyphW > atlasWidth {
+            atlasResetPending = true
             return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                            bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
         }
@@ -817,6 +906,7 @@ class MetalRenderer {
         }
         if atlasCursorY + glyphH > atlasHeight {
             if !growMonoAtlas(minWidth: atlasWidth, minHeight: atlasCursorY + glyphH) {
+                atlasResetPending = true
                 return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                                bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
             }
@@ -885,6 +975,7 @@ class MetalRenderer {
             _ = growEmojiAtlas(minWidth: glyphW, minHeight: emojiAtlasHeight)
         }
         if glyphW > emojiAtlasWidth {
+            atlasResetPending = true
             return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                            bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
         }
@@ -895,6 +986,7 @@ class MetalRenderer {
         }
         if emojiCursorY + glyphH > emojiAtlasHeight {
             if !growEmojiAtlas(minWidth: emojiAtlasWidth, minHeight: emojiCursorY + glyphH) {
+                atlasResetPending = true
                 return GlyphUV(uvX: 0, uvY: 0, uvW: 0, uvH: 0,
                                bearingX: 0, bearingY: 0, glyphWidth: 0, glyphHeight: 0)
             }
