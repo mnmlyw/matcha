@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const Cell = @import("Cell.zig");
 const Lexer = @import("../highlight/Lexer.zig");
 const Language = @import("../highlight/Language.zig").Language;
+const TokenType = @import("../highlight/TokenType.zig").TokenType;
 const PieceTable = @import("../buffer/PieceTable.zig").PieceTable;
 const UnicodeUtil = @import("../buffer/UnicodeIterator.zig");
 const nextClusterLen = UnicodeUtil.nextClusterLen;
@@ -66,7 +67,24 @@ const LineTokenCache = struct {
         self.entries.deinit(allocator);
     }
 
-    fn invalidate(self: *LineTokenCache, allocator: Allocator, line_count: u32, lang: Language, edit_counter: u32) void {
+    /// Invalidates cached tokens from `from_line` onward, leaving entries
+    /// before it untouched. Only takes that partial-invalidate path when
+    /// the cache's shape hasn't changed (same line count and language) and
+    /// `from_line` is in range -- otherwise falls back to a full rebuild,
+    /// which is required whenever the entries array itself needs resizing.
+    /// Safe by construction: entries before `from_line` depend only on
+    /// content and lexer state that an edit at or after `from_line` cannot
+    /// have altered.
+    fn invalidate(self: *LineTokenCache, allocator: Allocator, line_count: u32, lang: Language, edit_counter: u32, from_line: u32) void {
+        if (self.cached_line_count == line_count and self.cached_language == lang and from_line < self.entries.items.len) {
+            for (self.entries.items[from_line..]) |*entry| {
+                entry.deinit(allocator);
+                entry.* = .{};
+            }
+            self.cached_edit_counter = edit_counter;
+            return;
+        }
+
         for (self.entries.items) |*entry| {
             entry.deinit(allocator);
         }
@@ -171,10 +189,19 @@ pub const RenderState = struct {
                 self.line_token_cache.cached_language != lang or
                 self.line_token_cache.cached_line_count != line_count)
             {
-                self.line_token_cache.invalidate(self.allocator, line_count, lang, editor.edit_counter);
+                // editor.wrap_dirty_line (see Editor.zig) is set only when
+                // an edit is known to be confined to a single line's byte
+                // content -- true regardless of which per-line cache is
+                // asking, so it's safe to reuse here: invalidate from that
+                // line onward instead of the whole document. Lines before
+                // it are provably unaffected (their bytes and incoming
+                // lexer state can't have changed); null falls back to a
+                // full invalidate, exactly today's behavior.
+                const from_line = editor.wrap_dirty_line orelse 0;
+                self.line_token_cache.invalidate(self.allocator, line_count, lang, editor.edit_counter, from_line);
             }
         } else if (self.line_token_cache.cached_line_count != 0) {
-            self.line_token_cache.invalidate(self.allocator, 0, .none, editor.edit_counter);
+            self.line_token_cache.invalidate(self.allocator, 0, .none, editor.edit_counter, 0);
         }
 
         // Track max line length for horizontal scroll clamping
@@ -768,6 +795,88 @@ test "RenderState: highlight tokens are reused across redraws without edits" {
     const second_tokens = ed.render_state.line_token_cache.entries.items[0].tokens;
     try testing.expectEqual(first_tokens.ptr, second_tokens.ptr);
     try testing.expectEqual(first_tokens.len, second_tokens.len);
+}
+
+test "RenderState: editing one line preserves earlier lines' cached tokens" {
+    // LineTokenCache.invalidate invalidates from the edited line onward
+    // (conservative, to stay correct across cascading multi-line lexer
+    // state like open block comments -- see the block-comment test below)
+    // but leaves every line *before* it untouched, since those can never
+    // be affected by an edit at or after that point.
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.language = .zig;
+    ed.setViewport(80, 10, 1, 1);
+    try ed.insertText("const a = 1;\nconst b = 2;\nconst c = 3;");
+    ed.prepareRender();
+
+    const line0_before = ed.render_state.line_token_cache.entries.items[0].tokens;
+    try testing.expect(line0_before.len > 0);
+
+    // Single-character edit confined to line 1 only.
+    ed.setCursorPos(ed.buffer.lineColToPos(1, 5));
+    try ed.insertText("X");
+    ed.prepareRender();
+
+    // Line 0 comes strictly before the edit -- its cached tokens must be
+    // the exact same allocation, not just equal content, proving it was
+    // never touched by the invalidation.
+    const line0_after = ed.render_state.line_token_cache.entries.items[0].tokens;
+    try testing.expectEqual(line0_before.ptr, line0_after.ptr);
+}
+
+test "RenderState: single-line edit that closes a block comment correctly re-lexes every line after it" {
+    // Regression test for the cascading-lexer-state risk: if line 1's
+    // end-state changes (here, a block comment that used to stay open now
+    // closes on the same line), every line after it depended on the *old*
+    // end-state for its own tokenization and must be re-lexed too --
+    // invalidating only line 1 itself would leave lines 2 and 3 rendered
+    // with stale (incorrect) comment tokens.
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.language = .c;
+    ed.setViewport(80, 10, 1, 1);
+    try ed.insertText(
+        \\int a = 1;
+        \\int x = 1; /* start
+        \\still comment
+        \\still comment */ int y = 2;
+    );
+    ed.prepareRender();
+
+    // Sanity: line 2 ("still comment") is lexed as a single comment token
+    // while the block comment opened on line 1 is still open.
+    {
+        const line2_tokens = ed.render_state.line_token_cache.entries.items[2].tokens;
+        try testing.expectEqual(@as(usize, 1), line2_tokens.len);
+        try testing.expectEqual(TokenType.comment, line2_tokens[0].type);
+    }
+
+    // Close the comment on line 1 itself with a single-line edit (no
+    // newline inserted, no selection) -- this is exactly the case that
+    // sets Editor.wrap_dirty_line and takes the partial-invalidate path.
+    ed.setCursorPos(ed.buffer.lineColToPos(1, "int x = 1; /* start".len));
+    try ed.insertText(" */");
+    ed.prepareRender();
+
+    // Line 2 is no longer inside a comment -- it must be re-lexed as plain
+    // identifiers, not left with the stale single-comment-token cache from
+    // before the edit.
+    const line2_tokens = ed.render_state.line_token_cache.entries.items[2].tokens;
+    try testing.expect(line2_tokens.len > 1);
+    for (line2_tokens) |tok| {
+        try testing.expect(tok.type != .comment);
+    }
+
+    // Line 3's leading "still comment */" is no longer a comment-close
+    // either, since there's no open comment reaching it anymore.
+    const line3_tokens = ed.render_state.line_token_cache.entries.items[3].tokens;
+    try testing.expect(line3_tokens.len > 0);
+    try testing.expect(line3_tokens[0].type != .comment);
 }
 
 test "RenderState: trailing tab highlight uses tab-stop width" {

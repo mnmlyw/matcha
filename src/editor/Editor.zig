@@ -73,6 +73,17 @@ pub const Editor = struct {
     wrap_prefix_sums: std.ArrayListUnmanaged(u32) = .empty,
     wrap_cache_edit_counter: u32 = 0xFFFFFFFF,
     wrap_cache_wrap_width_bits: u32 = 0xFFFFFFFF,
+    /// Hint for ensureWrapCache's incremental fast path: the single line
+    /// touched since the wrap cache was last refreshed, if the edit is
+    /// known to be confined to exactly one line (no newline inserted or
+    /// deleted, no selection spanning multiple lines). `invalidateCaches`
+    /// resets this to null (the safe "unknown extent" default) on every
+    /// mutation; only the specific single-line-safe call sites
+    /// (insertTextWithOptions, deleteBackward, deleteForward) override it
+    /// afterward. Left null, ensureWrapCache falls back to a full rebuild
+    /// -- exactly today's behavior -- so every other edit path is
+    /// unaffected and cannot produce a stale wrap cache.
+    wrap_dirty_line: ?u32 = null,
 
     // Search cache: contiguous buffer snapshot for repeated find operations
     search_content_cache: std.ArrayListUnmanaged(u8) = .empty,
@@ -124,6 +135,11 @@ pub const Editor = struct {
     /// Invalidate render/wrap caches after any buffer mutation (no version tracking).
     fn invalidateCaches(self: *Editor) void {
         self.edit_counter +%= 1;
+        // Default to "unknown extent" -- forces ensureWrapCache's full
+        // rebuild. The few call sites that can prove the edit was confined
+        // to a single line set this back to that line right after calling
+        // this function.
+        self.wrap_dirty_line = null;
     }
 
     pub fn setLastError(self: *Editor, err: anyerror) void {
@@ -161,6 +177,7 @@ pub const Editor = struct {
         self.has_error = false;
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
         self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
+        self.wrap_dirty_line = null;
         if (self.filename_z) |z| self.allocator.free(z);
         self.filename_z = null;
         if (self.filename_owned) {
@@ -206,6 +223,7 @@ pub const Editor = struct {
         self.has_error = false;
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
         self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
+        self.wrap_dirty_line = null;
         self.filename = new_filename;
         self.filename_owned = true;
         if (self.filename_z) |z| self.allocator.free(z);
@@ -224,18 +242,41 @@ pub const Editor = struct {
         defer self.allocator.free(content);
 
         const io = std.Io.Threaded.global_single_threaded.io();
-        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
-        defer file.close(io);
-        try file.writeStreamingAll(io, content);
+        const dir = std.Io.Dir.cwd();
+
+        // Preserve the existing file's permissions across the replace, if it
+        // already exists; otherwise fall back to the default for a new file.
+        const permissions = if (dir.statFile(io, path, .{})) |st|
+            st.permissions
+        else |_|
+            std.Io.File.Permissions.default_file;
+
+        // Write to a temp file and atomically rename over the destination so
+        // a crash, power loss, or full disk mid-write can't leave the target
+        // truncated or partially written.
+        var atomic_file = try dir.createFileAtomic(io, path, .{
+            .permissions = permissions,
+            .replace = true,
+        });
+        defer atomic_file.deinit(io);
+        try atomic_file.file.writeStreamingAll(io, content);
+        try atomic_file.file.sync(io);
+        try atomic_file.replace(io);
 
         if (!std.mem.eql(u8, path, self.filename orelse "")) {
-            if (self.filename_owned) {
-                if (self.filename) |f| self.allocator.free(f);
-            }
-            self.filename = try self.allocator.dupe(u8, path);
+            const new_filename = try self.allocator.dupe(u8, path);
+            errdefer self.allocator.free(new_filename);
+            const new_filename_z = self.allocator.dupeZ(u8, path) catch null;
+
+            const old_filename = if (self.filename_owned) self.filename else null;
+            const old_filename_z = self.filename_z;
+
+            self.filename = new_filename;
             self.filename_owned = true;
-            if (self.filename_z) |z| self.allocator.free(z);
-            self.filename_z = self.allocator.dupeZ(u8, path) catch null;
+            self.filename_z = new_filename_z;
+
+            if (old_filename) |f| self.allocator.free(f);
+            if (old_filename_z) |z| self.allocator.free(z);
             self.language = Language.detectFromFilename(path);
         }
         self.modified = false;
@@ -293,6 +334,57 @@ pub const Editor = struct {
         self.ensureCursorVisible();
     }
 
+    /// Converts a raw buffer byte offset to a UTF-16 code-unit count, for
+    /// AppKit's NSTextInputClient position queries (selectedRange,
+    /// markedRange, IME candidate-window placement). Well-formed UTF-8 maps
+    /// exactly as UTF-16 requires (2 units for codepoints above U+FFFF, 1
+    /// otherwise). This walks the *raw buffer bytes* directly via the same
+    /// codepointAt/nextCodepointStart codepoint-boundary logic already used
+    /// for character navigation, rather than via a decoded Swift String —
+    /// a decoded String substitutes invalid UTF-8 with U+FFFD and re-encodes
+    /// to a different byte length, which desyncs any offset computed from it
+    /// relative to the real buffer. This function and
+    /// `utf16OffsetToBytePos` are exact inverses of each other by
+    /// construction, so a round-trip through AppKit (report a position,
+    /// receive it back, convert to a byte offset) always resolves to the
+    /// same byte offset — even on a buffer containing invalid UTF-8 —
+    /// instead of silently landing on the wrong bytes.
+    pub fn byteOffsetToUtf16Offset(self: *const Editor, byte_offset: u32) u32 {
+        const target = @min(byte_offset, self.buffer.totalLength());
+        var pos: u32 = 0;
+        var utf16_count: u32 = 0;
+        while (pos < target) {
+            const next = self.buffer.nextCodepointStart(pos);
+            // `target` falls strictly inside this codepoint's byte span
+            // (can happen for a byte offset that isn't on a codepoint
+            // boundary, e.g. one landing inside a multi-byte sequence) —
+            // stop here rather than counting a codepoint that hasn't fully
+            // started yet by `target`.
+            if (next > target) break;
+            const cp = self.buffer.codepointAt(pos);
+            utf16_count += if (cp > 0xFFFF) 2 else 1;
+            pos = next;
+        }
+        return utf16_count;
+    }
+
+    /// Inverse of `byteOffsetToUtf16Offset`. Snaps to the nearest codepoint
+    /// boundary rather than splitting a surrogate pair if `utf16_offset`
+    /// lands in the middle of one.
+    pub fn utf16OffsetToBytePos(self: *const Editor, utf16_offset: u32) u32 {
+        const total = self.buffer.totalLength();
+        var pos: u32 = 0;
+        var utf16_count: u32 = 0;
+        while (pos < total and utf16_count < utf16_offset) {
+            const cp = self.buffer.codepointAt(pos);
+            const units: u32 = if (cp > 0xFFFF) 2 else 1;
+            if (utf16_count + units > utf16_offset) break;
+            utf16_count += units;
+            pos = self.buffer.nextCodepointStart(pos);
+        }
+        return pos;
+    }
+
     pub fn replaceRangeLiteral(self: *Editor, start_pos: u32, end_pos: u32, text: []const u8) !void {
         const start = @min(start_pos, end_pos);
         const end = @max(start_pos, end_pos);
@@ -315,7 +407,8 @@ pub const Editor = struct {
         }
 
         // If there's a selection, delete it first (as part of the same undo group)
-        if (self.selection.active) {
+        const had_selection = self.selection.active;
+        if (had_selection) {
             try self.deleteSelectionNoCommit();
         }
 
@@ -327,6 +420,13 @@ pub const Editor = struct {
 
         try self.buffer.insert(pos, text);
         self.invalidateCaches();
+
+        // Wrap-cache fast path: with no selection deleted first and no
+        // newline in the inserted text, this edit is confined to exactly
+        // one line (the cursor's line doesn't change below either).
+        if (!had_selection and std.mem.indexOfScalar(u8, text, '\n') == null) {
+            self.wrap_dirty_line = self.cursor.line;
+        }
 
         // Advance cursor
         for (text) |ch| {
@@ -437,6 +537,14 @@ pub const Editor = struct {
         self.cursor.moveTo(lc.line, lc.col);
         self.cursor.target_col = self.cursor.col;
 
+        // Wrap-cache fast path: this deletion is confined to one line
+        // unless it removed a newline (the col==0 join-with-previous-line
+        // case), in which case the line count changed and the safe
+        // "unknown extent" default from invalidateCaches() stays in place.
+        if (std.mem.indexOfScalar(u8, del_bytes, '\n') == null) {
+            self.wrap_dirty_line = lc.line;
+        }
+
         const branched = try self.undo_stack.commit();
         self.markDirty(branched);
         self.ensureCursorVisible();
@@ -476,6 +584,12 @@ pub const Editor = struct {
 
         try self.buffer.delete(pos, del_len);
         self.invalidateCaches();
+
+        // Wrap-cache fast path: same reasoning as deleteBackward -- only
+        // safe when the deleted bytes didn't include a newline.
+        if (std.mem.indexOfScalar(u8, del_bytes, '\n') == null) {
+            self.wrap_dirty_line = self.cursor.line;
+        }
 
         const branched = try self.undo_stack.commit();
         self.markDirty(branched);
@@ -1612,6 +1726,7 @@ pub const Editor = struct {
         }
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
         self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
+        self.wrap_dirty_line = null;
     }
 
     pub fn setWideCellWidth(self: *Editor, wide_cell_w: f32) void {
@@ -1622,6 +1737,7 @@ pub const Editor = struct {
         }
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
         self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
+        self.wrap_dirty_line = null;
     }
 
     pub fn setHangulCellWidth(self: *Editor, hangul_cell_w: f32) void {
@@ -1632,6 +1748,7 @@ pub const Editor = struct {
         }
         self.wrap_cache_edit_counter = 0xFFFFFFFF;
         self.wrap_cache_wrap_width_bits = 0xFFFFFFFF;
+        self.wrap_dirty_line = null;
     }
 
     pub fn scroll(self: *Editor, dx: f32, dy: f32) void {
@@ -2335,7 +2452,90 @@ pub const Editor = struct {
         const wrap_width = if (self.config.wrap_lines) self.wrapWidthPixels() else 0;
         const wrap_width_bits: u32 = @bitCast(wrap_width);
         if (self.wrap_cache_edit_counter == self.edit_counter and self.wrap_cache_wrap_width_bits == wrap_width_bits) return;
+
+        // Fast path: exactly one line changed since the cache was last
+        // valid (wrap_dirty_line), the wrap width hasn't changed (a resize
+        // needs every line re-measured), and the cached array still has the
+        // shape a single-line patch expects. Patch just that line's row
+        // count instead of rescanning the whole document. Falls through to
+        // the full rebuild whenever any of that doesn't hold.
+        if (self.wrap_cache_wrap_width_bits == wrap_width_bits) {
+            if (self.wrap_dirty_line) |line| {
+                const line_count = self.buffer.lineCount();
+                if (line < line_count and self.wrap_prefix_sums.items.len == line_count + 1) {
+                    if (self.patchWrapCacheForLine(line, wrap_width)) {
+                        self.wrap_cache_edit_counter = self.edit_counter;
+                        self.wrap_cache_wrap_width_bits = wrap_width_bits;
+                        return;
+                    }
+                }
+            }
+        }
+
         self.rebuildWrapCache(wrap_width);
+    }
+
+    /// Patches `wrap_prefix_sums` for a single changed line, given the rest
+    /// of the document's wrapping is unaffected. Returns false (leaving the
+    /// cache untouched) on allocation failure, so the caller falls back to
+    /// `rebuildWrapCache`.
+    fn patchWrapCacheForLine(self: *Editor, line: u32, wrap_width: f32) bool {
+        const old_rows = self.wrap_prefix_sums.items[line + 1] - self.wrap_prefix_sums.items[line];
+        const line_content = self.buffer.lineContent(self.allocator, line) catch return false;
+        defer self.allocator.free(line_content);
+        const new_rows = self.wrapRowsForLine(line_content, wrap_width);
+
+        if (new_rows != old_rows) {
+            const delta: i64 = @as(i64, new_rows) - @as(i64, old_rows);
+            for (self.wrap_prefix_sums.items[line + 1 ..]) |*sum| {
+                sum.* = @intCast(@as(i64, sum.*) + delta);
+            }
+        }
+        return true;
+    }
+
+    /// Computes how many visual rows a single line wraps into. Applies the
+    /// exact same word-boundary wrap logic as `rebuildWrapCache`'s inner
+    /// loop -- that loop resets all wrap state at every newline, so each
+    /// line's row count is already fully independent of the others, and
+    /// this is a direct extraction of that per-line computation.
+    fn wrapRowsForLine(self: *const Editor, line_content: []const u8, wrap_width: f32) u32 {
+        if (!self.config.wrap_lines or wrap_width <= 0) return 1;
+
+        var line_rows: u32 = 1;
+        var line_vcol: u32 = 0;
+        var seg_x: f32 = 0;
+        var has_space = false;
+        var seg_x_at_space: f32 = 0;
+        var i: usize = 0;
+
+        while (i < line_content.len) {
+            if (seg_x >= wrap_width and seg_x > 0) {
+                if (has_space) {
+                    seg_x -= seg_x_at_space;
+                    has_space = false;
+                } else {
+                    seg_x = 0;
+                }
+                line_rows += 1;
+            }
+
+            const cluster_len = nextClusterLen(line_content, @intCast(i));
+            if (cluster_len == 0) break;
+            const cw = self.visualWidthForClusterAt(line_content, @intCast(i), line_vcol);
+            const px_w = self.pixelWidthForClusterAt(line_content, @intCast(i), line_vcol);
+
+            if (line_content[i] == ' ' or line_content[i] == '\t') {
+                has_space = true;
+                seg_x_at_space = seg_x + px_w;
+            }
+
+            i += cluster_len;
+            line_vcol += cw;
+            seg_x += px_w;
+        }
+
+        return line_rows;
     }
 
     /// Rebuild wrap cache by scanning content in a single pass (O(n) not O(n²)).
@@ -3122,6 +3322,220 @@ test "Editor: openFile failure preserves current document" {
     try testing.expectEqual(@as(u32, 4), ed.cursor.col);
 }
 
+test "Editor: saveAs writes content and is readable back" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(path);
+    const file_path = try std.fs.path.join(testing.allocator, &.{ path, "out.txt" });
+    defer testing.allocator.free(file_path);
+
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("hello atomic save");
+    try ed.saveAs(file_path);
+
+    try testing.expectEqualStrings(file_path, ed.filename.?);
+    try testing.expect(!ed.modified);
+
+    const file = try tmp.dir.openFile(io, "out.txt", .{});
+    defer file.close(io);
+    var read_buf: [256]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    const on_disk = try file_reader.interface.allocRemaining(testing.allocator, .limited(1024));
+    defer testing.allocator.free(on_disk);
+    try testing.expectEqualStrings("hello atomic save", on_disk);
+}
+
+test "Editor: saveAs replaces existing file content instead of appending" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "existing.txt",
+        .data = "this was a much longer original file",
+    });
+    const path = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(path);
+    const file_path = try std.fs.path.join(testing.allocator, &.{ path, "existing.txt" });
+    defer testing.allocator.free(file_path);
+
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("short");
+    try ed.saveAs(file_path);
+
+    const file = try tmp.dir.openFile(io, "existing.txt", .{});
+    defer file.close(io);
+    var read_buf: [256]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    const on_disk = try file_reader.interface.allocRemaining(testing.allocator, .limited(1024));
+    defer testing.allocator.free(on_disk);
+    try testing.expectEqualStrings("short", on_disk);
+}
+
+test "Editor: saveAs to a new path updates owned filename without leaking or dangling" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(dir_path);
+    const first_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "first.txt" });
+    defer testing.allocator.free(first_path);
+    const second_path = try std.fs.path.join(testing.allocator, &.{ dir_path, "second.txt" });
+    defer testing.allocator.free(second_path);
+
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("first save");
+    try ed.saveAs(first_path);
+    try testing.expectEqualStrings(first_path, ed.filename.?);
+
+    try ed.insertText(" then second");
+    try ed.saveAs(second_path);
+    // Old (first) filename must have been freed exactly once and the new
+    // one must be independently readable -- exercised under the testing
+    // allocator's leak/double-free detection via `ed.deinit()`.
+    try testing.expectEqualStrings(second_path, ed.filename.?);
+
+    const file = try tmp.dir.openFile(io, "second.txt", .{});
+    defer file.close(io);
+    var read_buf: [256]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    const on_disk = try file_reader.interface.allocRemaining(testing.allocator, .limited(1024));
+    defer testing.allocator.free(on_disk);
+    try testing.expectEqualStrings("first save then second", on_disk);
+}
+
+test "Editor: deleteForward on a truncated multibyte lead at end-of-line only removes that byte" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // "a\xF0" is a line ending in a lone 4-byte UTF-8 lead byte with no
+    // continuation bytes (e.g. from a file containing invalid UTF-8).
+    try ed.insertText("a\xF0\nnext");
+    ed.setCursorPos(1); // cursor sits right before the stray 0xF0 byte
+
+    try ed.deleteForward();
+
+    const content = try ed.buffer.getContent(testing.allocator);
+    defer testing.allocator.free(content);
+    // Only the stray byte should be removed; the newline and following
+    // line must survive intact (previously this deleted the newline and
+    // 2 bytes of "next" too, per the unclamped nextClusterLen bug).
+    try testing.expectEqualStrings("a\nnext", content);
+}
+
+test "Editor: byteOffsetToUtf16Offset matches plain ASCII byte-for-byte" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("hello world");
+    try testing.expectEqual(@as(u32, 0), ed.byteOffsetToUtf16Offset(0));
+    try testing.expectEqual(@as(u32, 5), ed.byteOffsetToUtf16Offset(5));
+    try testing.expectEqual(@as(u32, 11), ed.byteOffsetToUtf16Offset(11));
+}
+
+test "Editor: byteOffsetToUtf16Offset counts astral codepoints as 2 UTF-16 units" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // U+1F600 (grinning face emoji) is 4 UTF-8 bytes and a UTF-16 surrogate
+    // pair (2 code units); "a" before and "b" after are 1 byte / 1 unit each.
+    try ed.insertText("a\u{1F600}b");
+    try testing.expectEqual(@as(u32, 0), ed.byteOffsetToUtf16Offset(0)); // before "a"
+    try testing.expectEqual(@as(u32, 1), ed.byteOffsetToUtf16Offset(1)); // before emoji
+    try testing.expectEqual(@as(u32, 3), ed.byteOffsetToUtf16Offset(5)); // before "b" (1 + 2 units)
+    try testing.expectEqual(@as(u32, 4), ed.byteOffsetToUtf16Offset(6)); // end
+}
+
+test "Editor: utf16OffsetToBytePos is the exact inverse of byteOffsetToUtf16Offset" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\u{1F600}b\u{4E2D}c");
+    const total = ed.buffer.totalLength();
+    var pos: u32 = 0;
+    while (pos <= total) : (pos += 1) {
+        const utf16 = ed.byteOffsetToUtf16Offset(pos);
+        const back = ed.utf16OffsetToBytePos(utf16);
+        // Every byte offset we report must round-trip back to some valid
+        // codepoint-boundary byte offset whose own forward mapping matches
+        // (not necessarily `pos` itself, since `pos` may be mid-codepoint,
+        // but the round trip must never move past `pos`'s codepoint).
+        try testing.expect(back <= pos);
+        try testing.expectEqual(utf16, ed.byteOffsetToUtf16Offset(back));
+    }
+}
+
+test "Editor: byte offset <-> UTF-16 offset round-trips exactly on invalid UTF-8" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // "a" + two lone continuation bytes (each invalid as a standalone
+    // codepoint, but each 1 byte long per codepointByteLen) + "b". A Swift
+    // String decoding this replaces each invalid byte with a U+FFFD (3
+    // UTF-8 bytes when re-encoded), which is exactly why computing byte
+    // offsets from the *decoded* String desyncs from the real buffer and
+    // corrupts writes (the bug this function exists to avoid). Walking raw
+    // bytes here must not have that problem: every real byte offset in the
+    // buffer round-trips through UTF-16 space back to itself exactly.
+    try ed.insertText("a\x80\x81b");
+    const total = ed.buffer.totalLength();
+    try testing.expectEqual(@as(u32, 4), total);
+
+    // Every codepoint-boundary byte offset (0, 1, 2, 3, 4 -- each invalid
+    // byte here is its own 1-byte "codepoint" per codepointByteLen) must
+    // round-trip to itself exactly, proving the mapping never drifts off
+    // the real buffer bytes the way the decoded-String approach did.
+    var pos: u32 = 0;
+    while (pos <= total) : (pos += 1) {
+        const utf16 = ed.byteOffsetToUtf16Offset(pos);
+        try testing.expectEqual(pos, ed.utf16OffsetToBytePos(utf16));
+    }
+}
+
+test "Editor: byte offset <-> UTF-16 offset never overruns the buffer when a lead byte overclaims its length" {
+    var config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    // 0xF0 claims a 4-byte sequence per its leading bits, but only "b" (1
+    // byte) follows before the buffer ends -- `nextCodepointStart` clamps
+    // to the buffer's total length rather than reading past it (a
+    // pre-existing, separate invariant this function inherits, not
+    // something it introduces). The offset mapping must stay safe and
+    // in-bounds even though byte offset 3 ("b") isn't reachable as its own
+    // codepoint boundary in this scheme.
+    try ed.insertText("a\x80\xF0b");
+    const total = ed.buffer.totalLength();
+    try testing.expectEqual(@as(u32, 4), total);
+
+    var pos: u32 = 0;
+    while (pos <= total) : (pos += 1) {
+        const utf16 = ed.byteOffsetToUtf16Offset(pos);
+        const back = ed.utf16OffsetToBytePos(utf16);
+        try testing.expect(back <= pos);
+        try testing.expect(back <= total);
+        try testing.expectEqual(utf16, ed.byteOffsetToUtf16Offset(back));
+    }
+}
+
 test "Editor: replaceAll does not re-match inserted text" {
     const config = Config.defaults();
     var ed = Editor.init(testing.allocator, &config);
@@ -3542,6 +3956,172 @@ test "Editor: exact-fit wrapped CJK stays on one visual row" {
     const rect = ed.rectForPos(7);
     try testing.expectEqual(@as(f32, 4), rect.x);
     try testing.expectEqual(@as(f32, 0), rect.y);
+}
+
+test "Editor: incremental wrap cache patch matches a full rebuild after sequential typing" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(5, 20, 1.0, 1.0); // narrow: wraps after a handful of chars
+
+    // Type character by character -- each insertText call is a single-line
+    // edit and takes the incremental wrap-cache fast path added by
+    // patchWrapCacheForLine, rather than rescanning the whole document.
+    for ("abcdefghijklmno") |ch| {
+        try ed.insertText(&[_]u8{ch});
+    }
+
+    const incremental_rows = ed.lineVisualRows(0);
+    const incremental_total = ed.totalVisualRows();
+    try testing.expect(incremental_rows > 1); // sanity: this actually wrapped
+
+    // Force a full rebuild by bouncing the wrap width away and back, and
+    // confirm it agrees exactly with what the incremental path computed.
+    ed.setViewport(9, 20, 1.0, 1.0);
+    _ = ed.lineVisualRows(0); // triggers a rebuild at the bounced width
+    ed.setViewport(5, 20, 1.0, 1.0);
+    const rebuilt_rows = ed.lineVisualRows(0);
+    const rebuilt_total = ed.totalVisualRows();
+
+    try testing.expectEqual(rebuilt_rows, incremental_rows);
+    try testing.expectEqual(rebuilt_total, incremental_total);
+}
+
+test "Editor: incremental wrap cache patch matches full rebuild after sequential backspace" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(5, 20, 1.0, 1.0);
+    try ed.insertText("abcdefghijklmno"); // one bulk insert -- wraps to multiple rows
+    try testing.expect(ed.lineVisualRows(0) > 1);
+
+    // Delete back down to something that fits on one row, one cluster at a
+    // time -- each deleteBackward call takes the incremental fast path.
+    var i: usize = 0;
+    while (i < 12) : (i += 1) {
+        try ed.deleteBackward();
+    }
+
+    const incremental_rows = ed.lineVisualRows(0);
+    const incremental_total = ed.totalVisualRows();
+
+    ed.setViewport(9, 20, 1.0, 1.0);
+    _ = ed.lineVisualRows(0);
+    ed.setViewport(5, 20, 1.0, 1.0);
+    const rebuilt_rows = ed.lineVisualRows(0);
+    const rebuilt_total = ed.totalVisualRows();
+
+    try testing.expectEqual(rebuilt_rows, incremental_rows);
+    try testing.expectEqual(rebuilt_total, incremental_total);
+}
+
+test "Editor: wrap cache stays correct across a newline insert (fast-path-unsafe edit)" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(5, 20, 1.0, 1.0);
+    try ed.insertText("abcdefgh"); // wraps line 0 to 2 rows
+    try testing.expect(ed.lineVisualRows(0) > 1);
+
+    ed.setCursorPos(3);
+    try ed.insertText("\n"); // splits line 0 -- must not take the single-line fast path
+
+    // Reference: force a full rebuild and confirm it agrees.
+    const incremental_total = ed.totalVisualRows();
+    ed.setViewport(9, 20, 1.0, 1.0);
+    _ = ed.totalVisualRows();
+    ed.setViewport(5, 20, 1.0, 1.0);
+    const rebuilt_total = ed.totalVisualRows();
+
+    try testing.expectEqual(rebuilt_total, incremental_total);
+    try testing.expectEqual(@as(u32, 2), ed.buffer.lineCount());
+}
+
+test "Editor: wrap cache stays correct when backspace joins two lines (fast-path-unsafe edit)" {
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(5, 20, 1.0, 1.0);
+    try ed.insertText("abcdefgh\nijklmnop"); // two wrapped lines
+    try testing.expectEqual(@as(u32, 2), ed.buffer.lineCount());
+
+    ed.setCursorPos(9); // start of the second line
+    try ed.deleteBackward(); // joins the two lines -- must not take the fast path
+
+    const incremental_total = ed.totalVisualRows();
+    ed.setViewport(9, 20, 1.0, 1.0);
+    _ = ed.totalVisualRows();
+    ed.setViewport(5, 20, 1.0, 1.0);
+    const rebuilt_total = ed.totalVisualRows();
+
+    try testing.expectEqual(rebuilt_total, incremental_total);
+    try testing.expectEqual(@as(u32, 1), ed.buffer.lineCount());
+}
+
+test "Editor: wrap cache stays correct when a selection spanning a newline is replaced with newline-containing text" {
+    // Line count is unchanged end-to-end (one \n removed by the selection
+    // delete, one \n reintroduced by the replacement), so the wrap cache's
+    // array-length safety check alone wouldn't catch a bad fast-path patch
+    // here -- this specifically exercises the had_selection / newline-in-
+    // inserted-text guards in insertTextWithOptions. Confirmed to actually
+    // catch a regression: removing those guards makes this test fail
+    // (stale cached row count for line 1) while the array-length check
+    // alone lets it through undetected.
+    var config = Config.defaults();
+    config.line_numbers = false;
+    config.wrap_lines = true;
+
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    ed.setViewport(5, 20, 1.0, 1.0);
+    try ed.insertText("abcdefgh\nijklmnop\nqrstuvwx"); // three wrapped lines
+    try testing.expectEqual(@as(u32, 3), ed.buffer.lineCount());
+    try testing.expectEqual(@as(u32, 2), ed.lineVisualRows(1)); // "ijklmnop" wraps to 2 rows
+
+    // Select "defgh\nijklmnop" (positions 3..17), spanning both the first
+    // newline and all of what was line 1, then replace with text that
+    // leaves line 1 as a single short character ("Z", 1 row) -- chosen so
+    // a stale row count for line 1 (bug: fast-path patches only line 0,
+    // leaving line 1's old 2-row count in the cache) is visibly wrong
+    // rather than coincidentally matching.
+    ed.setSelectionPosRange(3, 17);
+    try ed.insertText("XY\nZ"); // replacement also contains exactly one \n
+    try testing.expectEqual(@as(u32, 3), ed.buffer.lineCount()); // net unchanged
+
+    const incremental_total = ed.totalVisualRows();
+    const incremental_row0 = ed.lineVisualRows(0);
+    const incremental_row1 = ed.lineVisualRows(1);
+    const incremental_row2 = ed.lineVisualRows(2);
+
+    ed.setViewport(9, 20, 1.0, 1.0);
+    _ = ed.totalVisualRows();
+    ed.setViewport(5, 20, 1.0, 1.0);
+    const rebuilt_total = ed.totalVisualRows();
+    const rebuilt_row0 = ed.lineVisualRows(0);
+    const rebuilt_row1 = ed.lineVisualRows(1);
+    const rebuilt_row2 = ed.lineVisualRows(2);
+
+    try testing.expectEqual(rebuilt_total, incremental_total);
+    try testing.expectEqual(rebuilt_row0, incremental_row0);
+    try testing.expectEqual(rebuilt_row1, incremental_row1);
+    try testing.expectEqual(rebuilt_row2, incremental_row2);
 }
 
 test "Editor: deleteBackward removes one CJK cluster on a long line" {

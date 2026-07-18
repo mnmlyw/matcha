@@ -314,6 +314,12 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         return NSRange(location: start, length: end - start)
     }
 
+    /// Converts a UTF-16 range to a byte range *within an arbitrary Swift
+    /// string* (e.g. the IME's own composing text) -- not the document
+    /// buffer. For document-wide queries use `documentUTF16RangeToByteRange`
+    /// instead, which is both cheaper (no full-buffer fetch) and safe on
+    /// invalid UTF-8 (this one, operating on an already-decoded String,
+    /// isn't).
     private func utf16RangeToByteRange(_ range: NSRange, in content: String) -> Range<UInt32>? {
         let clamped = clampUTF16Range(range, maxLength: content.utf16.count)
         guard clamped.location != NSNotFound else { return nil }
@@ -324,9 +330,34 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         return byteStart..<byteEnd
     }
 
-    private func byteOffsetToUTF16(_ offset: UInt32, in content: String) -> Int {
-        let clamped = min(Int(offset), content.utf8.count)
-        return String(decoding: content.utf8.prefix(clamped), as: UTF8.self).utf16.count
+    /// Converts a UTF-16 range (as reported by AppKit) to a byte range in
+    /// the *document buffer*, via the Zig-side ABI rather than by decoding
+    /// the whole document into a Swift String. Prefer this over
+    /// `utf16RangeToByteRange(_:in:)` for document-wide queries: besides
+    /// avoiding the full-buffer fetch, decoding the document into a String
+    /// substitutes invalid UTF-8 with U+FFFD and re-encodes it to a
+    /// different byte length, which desyncs any offset computed from it
+    /// relative to the real buffer -- and writing that offset back can
+    /// corrupt the document. `utf16RangeToByteRange(_:in:)` is still correct
+    /// (and necessary) for ranges within an arbitrary in-memory string, like
+    /// the IME's own composing text, which isn't the document buffer.
+    private func documentUTF16RangeToByteRange(_ range: NSRange) -> Range<UInt32>? {
+        guard range.location != NSNotFound else { return nil }
+        let maxU32 = Int(UInt32.max)
+        let location = max(0, min(range.location, maxU32))
+        let length = max(0, min(range.length, maxU32))
+        let startUTF16 = UInt32(location)
+        let endUTF16 = UInt32(min(location + length, maxU32))
+        let byteStart = editor.bytePos(fromUTF16Offset: startUTF16)
+        let byteEnd = editor.bytePos(fromUTF16Offset: endUTF16)
+        return byteStart..<max(byteStart, byteEnd)
+    }
+
+    /// Document-buffer counterpart to `byteOffsetToUTF16(_:in:)` -- see
+    /// `documentUTF16RangeToByteRange` for why this is preferred for
+    /// whole-document queries.
+    private func documentByteOffsetToUTF16(_ offset: UInt32) -> Int {
+        Int(editor.utf16Offset(fromBytePos: offset))
     }
 
     private func currentSelectionByteRange() -> Range<UInt32> {
@@ -337,8 +368,13 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         return cursor..<cursor
     }
 
-    private func replacementByteRange(for replacementRange: NSRange, in content: String) -> Range<UInt32> {
-        if let explicitRange = utf16RangeToByteRange(replacementRange, in: content) {
+    /// Resolves the byte range to replace for a marked-text update, via the
+    /// ABI-backed `documentUTF16RangeToByteRange` when AppKit supplied an
+    /// explicit replacement range -- the common case (continuing an
+    /// existing IME composition, or none) resolves from state that's
+    /// already O(1) and never touches the document buffer.
+    private func replacementByteRange(for replacementRange: NSRange) -> Range<UInt32> {
+        if let explicitRange = documentUTF16RangeToByteRange(replacementRange) {
             return explicitRange
         }
         if let marked = markedByteRange {
@@ -727,12 +763,16 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     func insertText(_ string: Any, replacementRange: NSRange) {
         let plain = plainString(from: string)
         let existingMarkedRange = markedByteRange
-        let content = editor.getContentCached() ?? ""
 
+        // Ordinary typing (the common case) has no marked text and no
+        // explicit replacement range, so it never touches the document
+        // buffer at all -- the rare explicit-range case (e.g. accessibility
+        // / reconversion flows) resolves via the ABI-backed
+        // documentUTF16RangeToByteRange, not by decoding the whole document.
         if let marked = existingMarkedRange {
             editor.replaceRange(start: marked.lowerBound, end: marked.upperBound, text: plain)
             editor.setCursorOffset(marked.lowerBound + UInt32(plain.utf8.count))
-        } else if let explicitRange = utf16RangeToByteRange(replacementRange, in: content) {
+        } else if let explicitRange = documentUTF16RangeToByteRange(replacementRange) {
             editor.replaceRange(start: explicitRange.lowerBound, end: explicitRange.upperBound, text: plain)
             editor.setCursorOffset(explicitRange.lowerBound + UInt32(plain.utf8.count))
         } else {
@@ -750,8 +790,7 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         let plain = plainString(from: string)
-        let content = editor.getContentCached() ?? ""
-        let replacedRange = replacementByteRange(for: replacementRange, in: content)
+        let replacedRange = replacementByteRange(for: replacementRange)
 
         editor.replaceRange(start: replacedRange.lowerBound, end: replacedRange.upperBound, text: plain)
 
@@ -778,28 +817,24 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     func selectedRange() -> NSRange {
-        guard let content = editor.getContentCached() else {
-            return NSRange(location: NSNotFound, length: 0)
-        }
-
         if let selection = editor.getSelectionOffsets() {
-            let start = byteOffsetToUTF16(selection.lowerBound, in: content)
-            let end = byteOffsetToUTF16(selection.upperBound, in: content)
+            let start = documentByteOffsetToUTF16(selection.lowerBound)
+            let end = documentByteOffsetToUTF16(selection.upperBound)
             return NSRange(location: start, length: end - start)
         }
 
         let cursor = editor.getCursorOffset()
-        let location = byteOffsetToUTF16(cursor, in: content)
+        let location = documentByteOffsetToUTF16(cursor)
         return NSRange(location: location, length: 0)
     }
 
     func markedRange() -> NSRange {
-        guard let marked = markedByteRange, let content = editor.getContentCached() else {
+        guard let marked = markedByteRange else {
             return NSRange(location: NSNotFound, length: 0)
         }
 
-        let start = byteOffsetToUTF16(marked.lowerBound, in: content)
-        let end = byteOffsetToUTF16(marked.upperBound, in: content)
+        let start = documentByteOffsetToUTF16(marked.lowerBound)
+        let end = documentByteOffsetToUTF16(marked.upperBound)
         return NSRange(location: start, length: end - start)
     }
 
@@ -829,8 +864,6 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
     }
 
     func characterIndex(for point: NSPoint) -> Int {
-        guard let content = editor.getContentCached() else { return 0 }
-
         let localPoint: NSPoint
         if let window {
             let windowPoint = window.convertPoint(fromScreen: point)
@@ -840,15 +873,13 @@ class MetalEditorView: MTKView, MTKViewDelegate, NSTextInputClient {
         }
 
         let offset = editor.hitTestOffset(x: Float(localPoint.x), y: Float(bounds.height - localPoint.y))
-        return byteOffsetToUTF16(offset, in: content)
+        return documentByteOffsetToUTF16(offset)
     }
 
     func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-        let content = editor.getContentCached() ?? ""
-        let clamped = clampUTF16Range(range, maxLength: content.utf16.count)
-        let offset = utf16RangeToByteRange(NSRange(location: clamped.location, length: 0), in: content)?.lowerBound
+        let offset = documentUTF16RangeToByteRange(NSRange(location: range.location, length: 0))?.lowerBound
             ?? editor.getCursorOffset()
-        actualRange?.pointee = NSRange(location: clamped.location == NSNotFound ? 0 : clamped.location, length: 0)
+        actualRange?.pointee = NSRange(location: range.location == NSNotFound ? 0 : range.location, length: 0)
 
         guard let rect = editor.rectForOffset(offset) else {
             return .zero

@@ -248,6 +248,25 @@ class MatchaEditor: ObservableObject {
         return matcha_editor_get_cursor_offset(h)
     }
 
+    /// Converts a raw buffer byte offset to a UTF-16 code-unit count,
+    /// computed directly from the buffer bytes on the Zig side rather than
+    /// from a decoded Swift String. Use this (and `byteOffsetFromUTF16`) for
+    /// NSTextInputClient position queries instead of `getContentCached()` +
+    /// manual UTF-16 counting -- a decoded String substitutes invalid UTF-8
+    /// with U+FFFD and re-encodes to a different byte length, which desyncs
+    /// any offset computed from it relative to the real buffer and can
+    /// corrupt the document when the offset is written back.
+    func utf16Offset(fromBytePos bytePos: UInt32) -> UInt32 {
+        guard let h = handle else { return 0 }
+        return matcha_editor_byte_offset_to_utf16(h, bytePos)
+    }
+
+    /// Inverse of `utf16Offset(fromBytePos:)`.
+    func bytePos(fromUTF16Offset utf16Offset: UInt32) -> UInt32 {
+        guard let h = handle else { return 0 }
+        return matcha_editor_utf16_offset_to_byte_pos(h, utf16Offset)
+    }
+
     func paste(text: String) {
         guard let h = handle else { return }
         text.withCString { ptr in

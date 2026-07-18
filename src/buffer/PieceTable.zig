@@ -83,15 +83,9 @@ pub const PieceTable = struct {
         const add_start: u32 = @intCast(self.add_buffer.items.len);
         try self.add_buffer.appendSlice(self.allocator, text);
 
-        const new_piece = Piece{
-            .source = .add,
-            .start = add_start,
-            .length = @intCast(text.len),
-        };
-
         if (self.pieces.items.len == 0) {
-            try self.pieces.append(self.allocator, new_piece);
-            try self.refreshCaches();
+            try self.pieces.append(self.allocator, .{ .source = .add, .start = add_start, .length = @intCast(text.len) });
+            try self.applyInsertToLineCache(pos, text);
             return;
         }
 
@@ -111,10 +105,42 @@ pub const PieceTable = struct {
             offset += p.length;
         }
 
+        // A piece ending exactly at `pos` that already covers the add-buffer
+        // bytes immediately preceding the ones we just appended (i.e. it was
+        // the last piece appended to add_buffer) can simply be extended in
+        // place, rather than allocating a new Piece and shifting the array.
+        // This is the hot path for sequential typing, where each keystroke
+        // inserts right where the previous one ended: without it, N
+        // keystrokes produce N pieces, and every piece walk (insert/delete
+        // locate, getContent, refreshCaches) becomes O(N).
+        const coalesce_idx: ?usize = if (idx >= self.pieces.items.len)
+            (if (self.pieces.items.len > 0) self.pieces.items.len - 1 else null)
+        else coalesce: {
+            const p = self.pieces.items[idx];
+            const rel = pos - offset;
+            if (rel == 0) break :coalesce (if (idx > 0) idx - 1 else null);
+            if (rel == p.length) break :coalesce idx;
+            break :coalesce null; // pos falls strictly inside pieces[idx]: must split
+        };
+        if (coalesce_idx) |ci| {
+            const prev = &self.pieces.items[ci];
+            if (prev.source == .add and prev.start + prev.length == add_start) {
+                prev.length += @intCast(text.len);
+                try self.applyInsertToLineCache(pos, text);
+                return;
+            }
+        }
+
+        const new_piece = Piece{
+            .source = .add,
+            .start = add_start,
+            .length = @intCast(text.len),
+        };
+
         if (idx >= self.pieces.items.len) {
             // Append at end
             try self.pieces.append(self.allocator, new_piece);
-            try self.refreshCaches();
+            try self.applyInsertToLineCache(pos, text);
             return;
         }
 
@@ -144,7 +170,7 @@ pub const PieceTable = struct {
             try self.pieces.insert(self.allocator, idx + 1, new_piece);
             try self.pieces.insert(self.allocator, idx + 2, right);
         }
-        try self.refreshCaches();
+        try self.applyInsertToLineCache(pos, text);
     }
 
     /// Delete `len` bytes starting at byte offset `pos`.
@@ -214,7 +240,7 @@ pub const PieceTable = struct {
 
             remaining -= to_delete;
         }
-        try self.refreshCaches();
+        self.applyDeleteToLineCache(pos, len);
     }
 
     /// Get the byte at a given position from the appropriate source buffer.
@@ -237,6 +263,23 @@ pub const PieceTable = struct {
     pub fn getContent(self: *const PieceTable, allocator: Allocator) ![]u8 {
         const total = self.totalLength();
         const buf = try allocator.alloc(u8, total);
+        var written: usize = 0;
+        for (self.pieces.items) |p| {
+            const slice = self.sourceSlice(p);
+            @memcpy(buf[written..][0..slice.len], slice);
+            written += slice.len;
+        }
+        return buf;
+    }
+
+    /// Copy the entire content into a contiguous, null-terminated buffer in
+    /// a single allocation and pass. Used at the C ABI boundary, which needs
+    /// a sentinel-terminated result — building that by calling `getContent`
+    /// and then copying again into a sentinel buffer would scan and copy the
+    /// whole document twice per call.
+    pub fn getContentZ(self: *const PieceTable, allocator: Allocator) ![:0]u8 {
+        const total = self.totalLength();
+        const buf = try allocator.allocSentinel(u8, total, 0);
         var written: usize = 0;
         for (self.pieces.items) |p| {
             const slice = self.sourceSlice(p);
@@ -356,6 +399,77 @@ pub const PieceTable = struct {
             }
         }
         return count;
+    }
+
+    /// Incrementally updates `line_starts`/`cached_total_length`/
+    /// `cached_line_count` for an insertion of `text` at byte offset `pos`,
+    /// without rescanning the rest of the document. `line_starts` holds
+    /// absolute byte offsets in ascending order, so this only needs to:
+    /// 1. shift every entry strictly after `pos` right by `text.len`
+    ///    (entries exactly at `pos` stay put — the inserted text extends
+    ///    that line forward rather than moving its start), and
+    /// 2. splice in any new line starts introduced by newlines in `text`.
+    fn applyInsertToLineCache(self: *PieceTable, pos: u32, text: []const u8) !void {
+        self.hint_piece_idx = 0;
+        self.hint_piece_offset = 0;
+
+        if (self.line_starts.items.len == 0) {
+            try self.line_starts.append(self.allocator, 0);
+        }
+
+        self.cached_total_length = (self.cached_total_length orelse 0) + @as(u32, @intCast(text.len));
+
+        // First index with offset > pos (the boundary between unaffected
+        // entries and ones that need to shift).
+        const lo = std.sort.upperBound(u32, self.line_starts.items, pos, struct {
+            fn order(ctx: u32, item: u32) std.math.Order {
+                return std.math.order(ctx, item);
+            }
+        }.order);
+
+        for (self.line_starts.items[lo..]) |*s| s.* += @intCast(text.len);
+
+        var new_starts: std.ArrayListUnmanaged(u32) = .empty;
+        defer new_starts.deinit(self.allocator);
+        for (text, 0..) |b, i| {
+            if (b == '\n') try new_starts.append(self.allocator, pos + @as(u32, @intCast(i)) + 1);
+        }
+        if (new_starts.items.len > 0) {
+            try self.line_starts.insertSlice(self.allocator, lo, new_starts.items);
+        }
+
+        self.cached_line_count = @intCast(self.line_starts.items.len);
+    }
+
+    /// Incrementally updates `line_starts`/`cached_total_length`/
+    /// `cached_line_count` for a deletion of `len` bytes at offset `pos`,
+    /// without rescanning the rest of the document. An entry at `o` is kept
+    /// unshifted when `o <= pos` (its defining newline, if any, lies before
+    /// the deleted range). An entry with `pos < o <= pos + len` is removed:
+    /// its defining newline at `o - 1` always falls inside `[pos, pos+len)`
+    /// (since `o - 1 >= pos`), so that line merges into the previous one.
+    /// Everything with `o > pos + len` survives and shifts left by `len`.
+    /// Never allocates, so it can't fail.
+    fn applyDeleteToLineCache(self: *PieceTable, pos: u32, len: u32) void {
+        self.hint_piece_idx = 0;
+        self.hint_piece_offset = 0;
+
+        self.cached_total_length = (self.cached_total_length orelse 0) - len;
+
+        const items = self.line_starts.items;
+        const order = struct {
+            fn order(ctx: u32, item: u32) std.math.Order {
+                return std.math.order(ctx, item);
+            }
+        }.order;
+        const lo = std.sort.upperBound(u32, items, pos, order);
+        const boundary = pos + len;
+        const hi = std.sort.upperBound(u32, items, boundary, order);
+
+        if (hi > lo) self.line_starts.replaceRangeAssumeCapacity(lo, hi - lo, &.{});
+        for (self.line_starts.items[lo..]) |*s| s.* -= len;
+
+        self.cached_line_count = @intCast(self.line_starts.items.len);
     }
 
     fn refreshCaches(self: *PieceTable) !void {
@@ -634,6 +748,39 @@ test "PieceTable: insert hint produces correct content over many forward inserts
     try std.testing.expectEqual(@as(u8, 'a' + (63 % 26)), content[63]);
 }
 
+test "PieceTable: sequential forward inserts coalesce into a single piece" {
+    var pt = PieceTable.init(std.testing.allocator);
+    defer pt.deinit();
+
+    var i: u32 = 0;
+    while (i < 500) : (i += 1) {
+        const ch: u8 = @intCast(@as(u32, 'a') + (i % 26));
+        const buf = [_]u8{ch};
+        try pt.insert(i, &buf);
+    }
+    // Without coalescing this would be 500 pieces (one per keystroke),
+    // making every piece walk O(N). Sequential append-at-end typing must
+    // stay a single piece.
+    try std.testing.expectEqual(@as(usize, 1), pt.pieceCount());
+    try std.testing.expectEqual(@as(u32, 500), pt.totalLength());
+}
+
+test "PieceTable: coalescing does not merge across a piece from a different insert site" {
+    var pt = try PieceTable.initWithContent(std.testing.allocator, "AB");
+    defer pt.deinit();
+
+    // Type "x" at the end (new add-buffer piece), then go back and type "y"
+    // in the middle of the *original* piece -- this must NOT coalesce with
+    // the "x" piece, since "y" isn't adjacent to "x" in add_buffer content
+    // or in document position.
+    try pt.insert(2, "x"); // "ABx"
+    try pt.insert(1, "y"); // "AyBx"
+
+    const content = try pt.getContent(std.testing.allocator);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("AyBx", content);
+}
+
 test "PieceTable: line operations" {
     var pt = try PieceTable.initWithContent(std.testing.allocator, "line1\nline2\nline3");
     defer pt.deinit();
@@ -696,5 +843,26 @@ test "PieceTable: randomized edits match contiguous model" {
         const content = try pt.getContent(std.testing.allocator);
         defer std.testing.allocator.free(content);
         try std.testing.expectEqualSlices(u8, model.items, content);
+        try std.testing.expectEqual(@as(u32, @intCast(model.items.len)), pt.totalLength());
+
+        // Independently recompute expected line starts from the model and
+        // check the piece table's incrementally-maintained line cache
+        // (line_starts, via lineCount/lineStart/lineEnd) matches exactly.
+        var expected_line_starts: std.ArrayListUnmanaged(u32) = .empty;
+        defer expected_line_starts.deinit(std.testing.allocator);
+        try expected_line_starts.append(std.testing.allocator, 0);
+        for (model.items, 0..) |b, i| {
+            if (b == '\n') try expected_line_starts.append(std.testing.allocator, @intCast(i + 1));
+        }
+        try std.testing.expectEqual(@as(u32, @intCast(expected_line_starts.items.len)), pt.lineCount());
+        for (expected_line_starts.items, 0..) |expected_start, line| {
+            try std.testing.expectEqual(expected_start, pt.lineStart(@intCast(line)));
+            const expected_end = if (line + 1 < expected_line_starts.items.len)
+                expected_line_starts.items[line + 1] - 1
+            else
+                @as(u32, @intCast(model.items.len));
+            try std.testing.expectEqual(expected_end, pt.lineEnd(@intCast(line)));
+        }
     }
 }
+

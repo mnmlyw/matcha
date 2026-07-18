@@ -375,12 +375,12 @@ export fn matcha_editor_get_selection_text(ed: ?*Editor) ?[*:0]u8 {
 
 export fn matcha_editor_get_content(ed: ?*Editor, len: ?*u32) ?[*:0]u8 {
     const e = ed orelse return null;
-    const content = e.buffer.getContent(e.allocator) catch return null;
-    defer e.allocator.free(content);
-
-    const result = c_allocator.allocSentinel(u8, content.len, 0) catch return null;
-    @memcpy(result[0..content.len], content);
-    if (len) |out_len| out_len.* = @intCast(content.len);
+    // Always allocate the returned buffer with c_allocator (regardless of
+    // which allocator the Editor itself was constructed with, e.g. tests
+    // use testing.allocator) since matcha_editor_free_string always frees
+    // with c_allocator.
+    const result = e.buffer.getContentZ(c_allocator) catch return null;
+    if (len) |out_len| out_len.* = @intCast(result.len);
     return result.ptr;
 }
 
@@ -395,6 +395,22 @@ export fn matcha_editor_get_selection_offsets(ed: ?*Editor, start: ?*u32, end: ?
 export fn matcha_editor_get_cursor_offset(ed: ?*Editor) u32 {
     const e = ed orelse return 0;
     return e.cursorPos();
+}
+
+/// Converts a raw buffer byte offset to a UTF-16 code-unit count, computed
+/// directly from the buffer bytes (not a decoded String), so it stays
+/// correct even when the buffer contains invalid UTF-8. Use this instead of
+/// decoding the whole buffer to a Swift String and counting UTF-16 units by
+/// hand for NSTextInputClient position queries.
+export fn matcha_editor_byte_offset_to_utf16(ed: ?*Editor, byte_offset: u32) u32 {
+    const e = ed orelse return 0;
+    return e.byteOffsetToUtf16Offset(byte_offset);
+}
+
+/// Inverse of `matcha_editor_byte_offset_to_utf16`.
+export fn matcha_editor_utf16_offset_to_byte_pos(ed: ?*Editor, utf16_offset: u32) u32 {
+    const e = ed orelse return 0;
+    return e.utf16OffsetToBytePos(utf16_offset);
 }
 
 /// Monotonic counter bumped on every buffer mutation. Useful for invalidating
@@ -942,6 +958,24 @@ test "main_c: content and selection offsets expose editor state" {
     try testing.expect(matcha_editor_get_selection_offsets(&ed, &start, &end));
     try testing.expectEqual(@as(u32, 1), start);
     try testing.expectEqual(@as(u32, 4), end);
+}
+
+test "main_c: byte offset <-> UTF-16 offset conversion round-trips through the ABI" {
+    const config = Config.defaults();
+    var ed = Editor.init(testing.allocator, &config);
+    defer ed.deinit();
+
+    try ed.insertText("a\u{1F600}b"); // "a" + astral emoji (2 UTF-16 units) + "b"
+
+    try testing.expectEqual(@as(u32, 0), matcha_editor_byte_offset_to_utf16(&ed, 0));
+    try testing.expectEqual(@as(u32, 1), matcha_editor_byte_offset_to_utf16(&ed, 1));
+    try testing.expectEqual(@as(u32, 3), matcha_editor_byte_offset_to_utf16(&ed, 5)); // after the emoji
+    try testing.expectEqual(@as(u32, 4), matcha_editor_byte_offset_to_utf16(&ed, 6)); // end
+
+    try testing.expectEqual(@as(u32, 0), matcha_editor_utf16_offset_to_byte_pos(&ed, 0));
+    try testing.expectEqual(@as(u32, 1), matcha_editor_utf16_offset_to_byte_pos(&ed, 1));
+    try testing.expectEqual(@as(u32, 5), matcha_editor_utf16_offset_to_byte_pos(&ed, 3));
+    try testing.expectEqual(@as(u32, 6), matcha_editor_utf16_offset_to_byte_pos(&ed, 4));
 }
 
 test "main_c: replace range inserts literal text" {

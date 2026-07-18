@@ -160,4 +160,61 @@ final class MatchaEditorTests: XCTestCase {
         editor.setCursorOffset(100) // past end — must not crash
         XCTAssertLessThanOrEqual(editor.getCursorOffset(), 3)
     }
+
+    // MARK: - UTF-16 <-> byte offset conversion (IME position queries)
+
+    func testUTF16OffsetRoundTripsThroughASCII() {
+        editor.insert(text: "hello world")
+        XCTAssertEqual(editor.utf16Offset(fromBytePos: 5), 5)
+        XCTAssertEqual(editor.bytePos(fromUTF16Offset: 5), 5)
+    }
+
+    func testUTF16OffsetCountsAstralCodepointsAsTwoUnits() {
+        // U+1F600 is 4 UTF-8 bytes and a UTF-16 surrogate pair (2 units).
+        editor.insert(text: "a\u{1F600}b")
+        XCTAssertEqual(editor.utf16Offset(fromBytePos: 0), 0)
+        XCTAssertEqual(editor.utf16Offset(fromBytePos: 1), 1) // just before the emoji
+        XCTAssertEqual(editor.utf16Offset(fromBytePos: 5), 3) // just before "b"
+        XCTAssertEqual(editor.bytePos(fromUTF16Offset: 3), 5)
+    }
+
+    /// Regression test for the IME byte-offset corruption bug: computing
+    /// byte offsets from a *decoded* Swift String (which substitutes
+    /// invalid UTF-8 with U+FFFD and re-encodes to a different byte length)
+    /// desyncs from the real buffer and can corrupt the document when an
+    /// IME writes back using that offset. `utf16Offset`/`bytePos` are
+    /// backed by an ABI call that walks the raw buffer bytes directly, so
+    /// every real byte offset must round-trip through UTF-16 space exactly,
+    /// even when the buffer contains invalid UTF-8 that `getContent()`
+    /// would have to lossily substitute.
+    ///
+    /// A Swift `String` can never itself hold invalid UTF-8 (any attempt to
+    /// build one already substitutes U+FFFD before it reaches the editor),
+    /// so the only way to get real invalid UTF-8 into the buffer through
+    /// the public API is to load a file containing raw bytes -- which is
+    /// also the realistic scenario this bug affects (opening a file with
+    /// mixed/foreign encoding and then using an IME on it).
+    func testUTF16OffsetRoundTripsExactlyOnInvalidUTF8() throws {
+        let invalidUTF8: [UInt8] = [0x61, 0x80, 0x81, 0x62] // "a" + 2 lone continuation bytes + "b"
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("matcha-invalid-utf8-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try Data(invalidUTF8).write(to: tmp)
+
+        XCTAssertTrue(editor.openFile(path: tmp.path))
+
+        // The buffer must have kept the original 4 raw bytes, not the
+        // length a lossy decode-to-String-and-back would produce (each
+        // U+FFFD substitution re-encodes to 3 UTF-8 bytes, so a naive
+        // round-trip would see 8 bytes here instead of 4). setCursorOffset
+        // clamps to the real buffer length, so this reads it without going
+        // through the lossy getContent() decode.
+        editor.setCursorOffset(.max)
+        XCTAssertEqual(editor.getCursorOffset(), 4)
+
+        for pos: UInt32 in 0...4 {
+            let utf16 = editor.utf16Offset(fromBytePos: pos)
+            XCTAssertEqual(editor.bytePos(fromUTF16Offset: utf16), pos, "byte offset \(pos) did not round-trip")
+        }
+    }
 }

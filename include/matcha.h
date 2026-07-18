@@ -151,6 +151,14 @@ uint32_t matcha_editor_get_cursor_offset(matcha_editor_t ed);
 /// cache content/UTF-16 mappings keyed on this value and refetch when it
 /// changes. Wraps on 32-bit overflow.
 uint32_t matcha_editor_get_buffer_version(matcha_editor_t ed);
+/// Converts a raw buffer byte offset to a UTF-16 code-unit count, computed
+/// directly from the buffer bytes rather than a decoded string, so it stays
+/// correct (and self-consistent with matcha_editor_utf16_offset_to_byte_pos)
+/// even when the buffer contains invalid UTF-8. Use for NSTextInputClient /
+/// IME position queries instead of decoding the whole buffer by hand.
+uint32_t matcha_editor_byte_offset_to_utf16(matcha_editor_t ed, uint32_t byte_offset);
+/// Inverse of matcha_editor_byte_offset_to_utf16.
+uint32_t matcha_editor_utf16_offset_to_byte_pos(matcha_editor_t ed, uint32_t utf16_offset);
 void matcha_editor_paste(matcha_editor_t ed, const char* text, uint32_t len);
 void matcha_editor_replace_range(matcha_editor_t ed, uint32_t start, uint32_t end,
                                   const char* text, uint32_t len);

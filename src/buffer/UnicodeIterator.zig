@@ -49,14 +49,14 @@ pub fn clusterWidth(data: []const u8, pos: u32) u2 {
     const first_cp = decodeCpAt(data, p);
     const first_byte_len = cpByteLenAt(data, p);
     var width: u2 = charWidth(first_cp);
-    var end: usize = p + first_byte_len;
+    var end: usize = @min(p + first_byte_len, data.len);
 
     // Regional indicators always render as a single flag glyph.
     if (first_cp >= 0x1F1E6 and first_cp <= 0x1F1FF) {
         if (end < data.len) {
             const next_cp = decodeCpAt(data, end);
             if (next_cp >= 0x1F1E6 and next_cp <= 0x1F1FF) {
-                end += cpByteLenAt(data, end);
+                end = @min(end + cpByteLenAt(data, end), data.len);
             }
         }
         return 2;
@@ -95,14 +95,17 @@ pub fn nextClusterLen(data: []const u8, pos: u32) u32 {
 
     const first_cp = decodeCpAt(data, p);
     const first_byte_len = cpByteLenAt(data, p);
-    var end: usize = p + first_byte_len;
+    // Clamp to the slice bound: a truncated multibyte sequence at the end of
+    // `data` (e.g. a lone leading byte at end-of-line) must not report a
+    // cluster length that extends past the data we were actually given.
+    var end: usize = @min(p + first_byte_len, data.len);
 
     // Regional indicators: consume exactly two
     if (first_cp >= 0x1F1E6 and first_cp <= 0x1F1FF) {
         if (end < data.len) {
             const next_cp = decodeCpAt(data, end);
             if (next_cp >= 0x1F1E6 and next_cp <= 0x1F1FF) {
-                end += cpByteLenAt(data, end);
+                end = @min(end + cpByteLenAt(data, end), data.len);
             }
         }
         return @intCast(end - p);
@@ -263,4 +266,21 @@ test "Unicode: clusterWidth keeps emoji keycaps wide" {
 test "Unicode: clusterWidth keeps non-emoji ZWJ clusters narrow" {
     const text = "a\u{200D}b";
     try testing.expectEqual(@as(u2, 1), clusterWidth(text, 0));
+}
+
+test "Unicode: nextClusterLen clamps a truncated 4-byte lead at end of data" {
+    // 0xF0 alone claims a 4-byte sequence but only 1 byte is present.
+    const text = "a\xF0";
+    try testing.expectEqual(@as(u32, 1), nextClusterLen(text, 1));
+}
+
+test "Unicode: nextClusterLen clamps a truncated 3-byte lead at end of data" {
+    const text = "a\xE2\x82"; // 0xE2 0x82 is a truncated 3-byte sequence (missing final byte)
+    try testing.expectEqual(@as(u32, 2), nextClusterLen(text, 1));
+}
+
+test "Unicode: clusterWidth does not read past a truncated lead byte" {
+    const text = "a\xF0";
+    // Must not attempt to read bytes beyond the 2-byte slice.
+    try testing.expectEqual(@as(u2, 1), clusterWidth(text, 1));
 }

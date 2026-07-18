@@ -88,9 +88,13 @@ fn applyKeyValue(allocator: Allocator, config: *Config, key: []const u8, value: 
         try config.setFontFamily(allocator, value);
     } else if (std.mem.eql(u8, key, "font-size")) {
         // Keep the current value on parse failure rather than silently
-        // resetting to the default — protects against typos.
+        // resetting to the default — protects against typos. `parseFloat`
+        // accepts "inf"/absurd magnitudes like "1e308"; those (and NaN)
+        // must be rejected here too, or they reach font/atlas creation as
+        // infinite/NaN glyph metrics and crash or hang at launch. Cap to a
+        // sane range, matching the tab-size guard just below.
         if (std.fmt.parseFloat(f64, value)) |v| {
-            if (v > 0) config.font_size = v;
+            if (v >= 1 and v <= 512 and std.math.isFinite(v)) config.font_size = v;
         } else |_| {}
     } else if (std.mem.eql(u8, key, "tab-size")) {
         if (std.fmt.parseInt(u32, value, 10)) |v| {
@@ -260,6 +264,36 @@ test "Parser: rejects tab-size 0 and keeps prior on parse failure" {
     );
     try std.testing.expectEqual(@as(u32, 4), config.tab_size); // unchanged
     try std.testing.expectEqual(@as(f64, 17), config.font_size); // unchanged
+}
+
+test "Parser: rejects non-finite and out-of-range font-size values" {
+    var config = Config.defaults();
+    defer config.deinit();
+    config.font_size = 17;
+
+    // "inf" and huge finite magnitudes are accepted by parseFloat but must
+    // not reach font/atlas creation as infinite/NaN glyph metrics.
+    try parse(std.testing.allocator, &config, "font-size = inf");
+    try std.testing.expectEqual(@as(f64, 17), config.font_size);
+
+    try parse(std.testing.allocator, &config, "font-size = -inf");
+    try std.testing.expectEqual(@as(f64, 17), config.font_size);
+
+    try parse(std.testing.allocator, &config, "font-size = nan");
+    try std.testing.expectEqual(@as(f64, 17), config.font_size);
+
+    try parse(std.testing.allocator, &config, "font-size = 1e308");
+    try std.testing.expectEqual(@as(f64, 17), config.font_size);
+
+    try parse(std.testing.allocator, &config, "font-size = 0");
+    try std.testing.expectEqual(@as(f64, 17), config.font_size);
+
+    try parse(std.testing.allocator, &config, "font-size = 10000");
+    try std.testing.expectEqual(@as(f64, 17), config.font_size);
+
+    // A sane value still applies normally.
+    try parse(std.testing.allocator, &config, "font-size = 22.5");
+    try std.testing.expectEqual(@as(f64, 22.5), config.font_size);
 }
 
 test "Parser: 3-digit hex shorthand and case-insensitive bool" {
